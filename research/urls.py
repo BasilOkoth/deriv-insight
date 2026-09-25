@@ -7,6 +7,11 @@ urlpatterns = [
     path("conditional/", views.conditional_lab, name="conditional_lab"),
     path("cross-market/", views.cross_market_lab, name="cross_market_lab"),
     path("balanced/", views.balanced_lab, name="balanced_lab"),
+    path(
+        "balanced/batch/<str:batch_id>/step/",
+        views.balanced_batch_step,
+        name="balanced_batch_step",
+    ),
     path("radar/", views.edge_radar, name="edge_radar"),
     path("backtests/", views.backtests, name="backtests"),
     path("demo/", views.demo_lab, name="demo_lab"),

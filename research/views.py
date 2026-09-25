@@ -8,6 +8,7 @@ from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.db.models import Sum
 from django.http import JsonResponse
+from django.views.decorators.http import require_POST
 from django.shortcuts import render, redirect
 from django.utils import timezone
 from django.conf import settings
@@ -838,7 +839,7 @@ def _default_balanced_symbols(symbol_rows):
     return preferred[:8]
 
 
-def _recent_balanced_batch_runs(limit=300):
+def _recent_balanced_batch_runs(limit=500):
     return list(
         ResearchRun.objects.filter(contract_type=BALANCED_RUN_TYPE)
         .order_by("-created_at")[:limit]
@@ -857,15 +858,44 @@ def _balanced_batch_state(batch_id):
     return latest
 
 
-def _latest_balanced_resumable_batch():
+def _balanced_batch_ids():
     seen = []
     for run in _recent_balanced_batch_runs():
         batch_id = (run.results or {}).get("batch_id")
         if batch_id and batch_id not in seen:
             seen.append(batch_id)
+    return seen
 
-    for batch_id in seen:
+
+def _latest_balanced_active_batch():
+    """Newest batch that still has pending markets."""
+    for batch_id in _balanced_batch_ids():
         state = _balanced_batch_state(batch_id)
+        pending = [
+            run
+            for run in state.values()
+            if (run.results or {}).get("batch_status") == "pending"
+        ]
+        if pending:
+            return {
+                "batch_id": batch_id,
+                "pending_count": len(pending),
+            }
+    return None
+
+
+def _latest_balanced_resumable_batch():
+    """Newest finished batch with failed markets and no pending work."""
+    for batch_id in _balanced_batch_ids():
+        state = _balanced_batch_state(batch_id)
+        statuses = [
+            (run.results or {}).get("batch_status")
+            for run in state.values()
+        ]
+
+        if "pending" in statuses:
+            continue
+
         failed = [
             run
             for run in state.values()
@@ -878,6 +908,31 @@ def _latest_balanced_resumable_batch():
                 "failed_symbols": [run.symbol for run in failed],
             }
     return None
+
+
+def _save_balanced_pending(
+    *,
+    batch_id,
+    symbol,
+    name,
+    ticks,
+    stake,
+    batch_order,
+):
+    ResearchRun.objects.create(
+        symbol=symbol,
+        contract_type=BALANCED_RUN_TYPE,
+        ticks=0,
+        results={
+            "engine_version": BALANCED_ENGINE_VERSION,
+            "batch_id": batch_id,
+            "batch_status": "pending",
+            "name": name,
+            "requested_ticks": int(ticks),
+            "stake": float(stake),
+            "batch_order": int(batch_order),
+        },
+    )
 
 
 def _balanced_quotes_and_rows(*, symbol, study, stake):
@@ -923,7 +978,7 @@ def _balanced_quotes_and_rows(*, symbol, study, stake):
                 lower95_pct=base["lower"] * 100,
                 edge_pp=(base["p"] - break_even) * 100,
                 sample_ticks=study["holdout_ticks"],
-                decision="BALANCED V1.2.2",
+                decision="BALANCED V1.2.3",
             )
         except Exception as exc:
             quote_map[base["outcome_id"]] = {
@@ -1059,9 +1114,9 @@ def _save_balanced_failure(
             "batch_status": "failed",
             "name": name,
             "error": str(error),
-            "requested_ticks": ticks,
-            "stake": stake,
-            "batch_order": batch_order,
+            "requested_ticks": int(ticks),
+            "stake": float(stake),
+            "batch_order": int(batch_order),
         },
     )
 
@@ -1112,9 +1167,9 @@ def _save_balanced_complete(
             "batch_id": batch_id,
             "batch_status": "complete",
             "name": name,
-            "requested_ticks": ticks,
-            "stake": stake,
-            "batch_order": batch_order,
+            "requested_ticks": int(ticks),
+            "stake": float(stake),
+            "batch_order": int(batch_order),
             "ticks": study["ticks"],
             "discovery_ticks": study["discovery_ticks"],
             "holdout_ticks": study["holdout_ticks"],
@@ -1132,55 +1187,49 @@ def _save_balanced_complete(
     )
 
 
-def _run_balanced_batch_symbols(
-    *,
-    batch_id,
-    symbols,
-    name_by_code,
-    ticks,
-    stake,
-    batch_order_map,
-):
-    """Run only the supplied symbols and persist each result immediately."""
-    for index, symbol in enumerate(symbols):
-        name = name_by_code.get(symbol, symbol)
+def _process_one_balanced_symbol(run):
+    """Process exactly one pending market inside one HTTP request."""
+    payload = run.results or {}
+    batch_id = payload["batch_id"]
+    symbol = run.symbol
+    name = payload.get("name", symbol)
+    ticks = int(payload.get("requested_ticks", 25000))
+    stake = float(payload.get("stake", 1.0))
+    batch_order = int(payload.get("batch_order", 0))
 
-        try:
-            _data, digits = _history(symbol, ticks)
-            study = run_balanced_lab(digits)
-            baselines, validation_rows = _balanced_quotes_and_rows(
-                symbol=symbol,
-                study=study,
-                stake=stake,
-            )
+    try:
+        _data, digits = _history(symbol, ticks)
+        study = run_balanced_lab(digits)
+        baselines, validation_rows = _balanced_quotes_and_rows(
+            symbol=symbol,
+            study=study,
+            stake=stake,
+        )
 
-            _save_balanced_complete(
-                batch_id=batch_id,
-                symbol=symbol,
-                name=name,
-                ticks=ticks,
-                stake=stake,
-                batch_order=batch_order_map.get(symbol, index),
-                study=study,
-                baselines=baselines,
-                validation_rows=validation_rows,
-            )
+        _save_balanced_complete(
+            batch_id=batch_id,
+            symbol=symbol,
+            name=name,
+            ticks=ticks,
+            stake=stake,
+            batch_order=batch_order,
+            study=study,
+            baselines=baselines,
+            validation_rows=validation_rows,
+        )
+        return "complete", ""
 
-        except Exception as exc:
-            _save_balanced_failure(
-                batch_id=batch_id,
-                symbol=symbol,
-                name=name,
-                error=exc,
-                ticks=ticks,
-                stake=stake,
-                batch_order=batch_order_map.get(symbol, index),
-            )
-
-        # Deliberate market-to-market pacing. History paging has its own pacing
-        # and bounded 429 retry/backoff in DerivPublicClient.
-        if index < len(symbols) - 1:
-            time.sleep(1.0)
+    except Exception as exc:
+        _save_balanced_failure(
+            batch_id=batch_id,
+            symbol=symbol,
+            name=name,
+            error=exc,
+            ticks=ticks,
+            stake=stake,
+            batch_order=batch_order,
+        )
+        return "failed", str(exc)
 
 
 def _build_balanced_batch_result(batch_id):
@@ -1208,11 +1257,16 @@ def _build_balanced_batch_result(batch_id):
 
     for run in runs:
         payload = run.results or {}
-        ok = payload.get("batch_status") == "complete"
+        status = payload.get("batch_status", "pending")
+        ok = status == "complete"
+
         row = {
             "symbol": run.symbol,
             "name": payload.get("name", run.symbol),
+            "status": status,
             "ok": ok,
+            "pending": status == "pending",
+            "failed": status == "failed",
             "error": payload.get("error", ""),
         }
 
@@ -1260,6 +1314,7 @@ def _build_balanced_batch_result(batch_id):
         symbols = sorted(set(bucket["symbols"]))
         if len(symbols) < 2:
             continue
+
         live_symbols = sorted(set(bucket["live_candidate_symbols"]))
         recurrent.append(
             {
@@ -1282,12 +1337,18 @@ def _build_balanced_batch_result(batch_id):
         )
     )
 
+    completed = sum(1 for row in market_rows if row["ok"])
+    failed = sum(1 for row in market_rows if row["failed"])
+    pending = sum(1 for row in market_rows if row["pending"])
+
     return {
         "engine_version": BALANCED_ENGINE_VERSION,
         "batch_id": batch_id,
         "requested": len(market_rows),
-        "completed": sum(1 for row in market_rows if row["ok"]),
-        "failed": sum(1 for row in market_rows if not row["ok"]),
+        "completed": completed,
+        "failed": failed,
+        "pending": pending,
+        "finished": pending == 0,
         "total_tests": total_tests,
         "total_discovery": total_discovery,
         "total_validated": total_validated,
@@ -1296,6 +1357,62 @@ def _build_balanced_batch_result(batch_id):
         "cross_market_recurrent": recurrent[:30],
         "markets": market_rows,
     }
+
+
+@login_required
+@require_POST
+def balanced_batch_step(request, batch_id):
+    """Run one pending symbol, then return compact progress as JSON."""
+    state = _balanced_batch_state(batch_id)
+
+    if not state:
+        return JsonResponse(
+            {"ok": False, "error": "Balanced batch not found."},
+            status=404,
+        )
+
+    pending = [
+        run
+        for run in state.values()
+        if (run.results or {}).get("batch_status") == "pending"
+    ]
+    pending.sort(
+        key=lambda run: (run.results or {}).get("batch_order", 999)
+    )
+
+    if not pending:
+        result = _build_balanced_batch_result(batch_id)
+        return JsonResponse(
+            {
+                "ok": True,
+                "finished": True,
+                "processed_symbol": None,
+                "processed_status": None,
+                "completed": result["completed"],
+                "failed": result["failed"],
+                "pending": result["pending"],
+                "requested": result["requested"],
+            }
+        )
+
+    run = pending[0]
+    processed_symbol = run.symbol
+    processed_status, processed_error = _process_one_balanced_symbol(run)
+    result = _build_balanced_batch_result(batch_id)
+
+    return JsonResponse(
+        {
+            "ok": True,
+            "finished": result["finished"],
+            "processed_symbol": processed_symbol,
+            "processed_status": processed_status,
+            "processed_error": processed_error,
+            "completed": result["completed"],
+            "failed": result["failed"],
+            "pending": result["pending"],
+            "requested": result["requested"],
+        }
+    )
 
 
 @login_required
@@ -1328,7 +1445,6 @@ def balanced_lab(request):
         },
     )
 
-    result = None
     error = ""
 
     if request.method == "POST":
@@ -1347,49 +1463,27 @@ def balanced_lab(request):
                     if (run.results or {}).get("batch_status") == "failed"
                 ]
 
-                if failed_runs:
-                    first_payload = failed_runs[0].results or {}
-                    ticks = int(
-                        first_payload.get("requested_ticks", 25000)
-                    )
-                    stake = float(
-                        first_payload.get("stake", cfg.stake_usd)
-                    )
-
-                    failed_symbols = [
-                        run.symbol
-                        for run in failed_runs
-                    ]
-                    batch_order_map = {
-                        run.symbol: int(
-                            (run.results or {}).get(
-                                "batch_order",
-                                index,
-                            )
-                        )
-                        for index, run in enumerate(failed_runs)
-                    }
-                    saved_names = {
-                        run.symbol: (run.results or {}).get(
-                            "name",
-                            run.symbol,
-                        )
-                        for run in failed_runs
-                    }
-
-                    _run_balanced_batch_symbols(
+                for run in failed_runs:
+                    payload = run.results or {}
+                    _save_balanced_pending(
                         batch_id=batch_id,
-                        symbols=failed_symbols,
-                        name_by_code={
-                            **saved_names,
-                            **name_by_code,
-                        },
-                        ticks=ticks,
-                        stake=stake,
-                        batch_order_map=batch_order_map,
+                        symbol=run.symbol,
+                        name=payload.get("name", run.symbol),
+                        ticks=int(
+                            payload.get("requested_ticks", 25000)
+                        ),
+                        stake=float(
+                            payload.get("stake", cfg.stake_usd)
+                        ),
+                        batch_order=int(
+                            payload.get("batch_order", 0)
+                        ),
                     )
 
-                result = _build_balanced_batch_result(batch_id)
+                if failed_runs:
+                    return redirect(
+                        f"{request.path}?batch={batch_id}"
+                    )
 
         elif form.is_valid():
             selected = form.cleaned_data["symbols"]
@@ -1397,29 +1491,45 @@ def balanced_lab(request):
             stake = float(form.cleaned_data["stake"])
             batch_id = uuid.uuid4().hex[:12]
 
-            batch_order_map = {
-                symbol: index
-                for index, symbol in enumerate(selected)
-            }
+            for batch_order, symbol in enumerate(selected):
+                _save_balanced_pending(
+                    batch_id=batch_id,
+                    symbol=symbol,
+                    name=name_by_code.get(symbol, symbol),
+                    ticks=ticks,
+                    stake=stake,
+                    batch_order=batch_order,
+                )
 
-            _run_balanced_batch_symbols(
-                batch_id=batch_id,
-                symbols=selected,
-                name_by_code=name_by_code,
-                ticks=ticks,
-                stake=stake,
-                batch_order_map=batch_order_map,
+            # Important: no Deriv history request is executed here.
+            # The browser-driven step endpoint will process one market at a time.
+            return redirect(
+                f"{request.path}?batch={batch_id}"
             )
+
+    batch_id = request.GET.get("batch", "").strip()
+    result = None
+
+    if batch_id:
+        state = _balanced_batch_state(batch_id)
+        if state:
             result = _build_balanced_batch_result(batch_id)
+        else:
+            error = "The requested balanced batch could not be found."
 
     resumable = None
-    if result and result["failed"]:
-        resumable = {
-            "batch_id": result["batch_id"],
-            "failed_count": result["failed"],
-        }
-    elif not result:
-        resumable = _latest_balanced_resumable_batch()
+    continuable = None
+
+    if result:
+        if result["pending"] == 0 and result["failed"]:
+            resumable = {
+                "batch_id": result["batch_id"],
+                "failed_count": result["failed"],
+            }
+    else:
+        continuable = _latest_balanced_active_batch()
+        if not continuable:
+            resumable = _latest_balanced_resumable_batch()
 
     return render(
         request,
@@ -1429,6 +1539,7 @@ def balanced_lab(request):
             "result": result,
             "error": error,
             "resumable": resumable,
+            "continuable": continuable,
         },
     )
 

@@ -1,91 +1,64 @@
-DERIV INSIGHT v1.2.2 — MULTI-MARKET BALANCED BATCH
+DERIV INSIGHT v1.2.3 — STEPWISE BALANCED BATCH FIX
 ===================================================
 
-This package contains COMPLETE files. Do not paste partial patches.
+This fixes the Internal Server Error caused by running all 8 x 25,000-tick
+balanced studies inside one Gunicorn web request.
 
-REPLACE these complete files:
-1. research/forms.py
-2. research/views.py
+REPLACE these COMPLETE files:
+1. research/views.py
+2. research/urls.py
 3. research/services/balanced.py
 4. research/templates/research/balanced.html
 
-Everything else from v1.2.1 stays unchanged.
+Everything else from v1.2.2 / v1.2.1 stays unchanged.
 
 No database migration is required.
-No new environment variable is required.
+No new Render service, Redis, Celery, worker, or environment variable is
+required.
+Do NOT increase Gunicorn's 120-second timeout for this fix.
+
+HOW THE FIX WORKS
+-----------------
+Old v1.2.2:
+One browser POST tried to run all selected markets before returning HTML.
+Eight 25,000-tick markets could exceed Gunicorn --timeout 120.
+
+New v1.2.3:
+1. "Run all balanced studies" immediately creates a saved batch.
+2. Every selected market is stored as PENDING in ResearchRun.
+3. Browser is redirected to the saved batch page.
+4. JavaScript calls a new endpoint:
+     /balanced/batch/<batch_id>/step/
+5. That endpoint processes EXACTLY ONE pending market.
+6. Result is stored COMPLETE or FAILED.
+7. Browser calls the endpoint again for the next market.
+8. When PENDING reaches zero, the page reloads and shows the final comparison.
+
+Therefore:
+- 8 markets are no longer one 120-second request.
+- one market = one web request;
+- refresh does not lose completed results;
+- leaving the page does not delete the batch;
+- reopening the batch continues pending markets;
+- failures can be retried without rerunning completed markets.
+
+AFTER DEPLOYMENT
+----------------
+1. Open Balanced Contracts Lab.
+2. Keep all eight 1-second Volatility markets selected.
+3. Ticks per market = 25,000.
+4. Stake = $1.
+5. Click "Run all balanced studies".
+6. You should immediately see the batch page with PENDING rows.
+7. The progress message should move market-by-market:
+     Completed 0 of 8
+     Completed 1 of 8
+     Completed 2 of 8
+     ...
+8. When complete, the final comparison table appears.
+9. If a symbol still fails after API retry/backoff, use "Retry failed markets".
+
+IMPORTANT
+---------
 Keep DERIV_DEMO_ENABLED=false.
-
-WHAT CHANGES
-------------
-Balanced Contracts Lab is now multi-market.
-
-When the page opens, currently active 1-second Volatility markets are selected
-by default, up to eight:
-- 1HZ10V
-- 1HZ15V
-- 1HZ25V
-- 1HZ30V
-- 1HZ50V
-- 1HZ75V
-- 1HZ90V
-- 1HZ100V
-(only symbols actually returned by Deriv are shown/selected)
-
-You can select up to eight markets and click:
-
-RUN ALL BALANCED STUDIES
-
-Each selected market gets:
-- 25,000 ticks (or 10,000 if chosen)
-- 70% discovery / 30% holdout
-- four pre-declared outcomes only:
-  * Even
-  * Odd
-  * Over 4
-  * Under 5
-- min context N 150
-- min discovery uplift +0.75 pp
-- BH-FDR q <= 0.10
-- live ask/payout check
-
-The consolidated comparison shows:
-- Even probability / live break-even
-- Odd probability / live break-even
-- Over 4 probability / live break-even
-- Under 5 probability / live break-even
-- tests
-- discovery candidates
-- validated candidates
-- live research candidates
-
-RESUMABLE
----------
-Every market is saved immediately in the existing ResearchRun table.
-
-If any market fails after the v1.2.1 rate-limit retries, the page shows:
-
-RETRY FAILED MARKETS
-
-That button reruns only failed markets for that saved batch.
-Completed markets are not repeated.
-
-CROSS-MARKET RECURRENCE
------------------------
-If the exact same condition/outcome pair independently survives holdout on two
-or more markets, the page reports it in a separate recurrence table.
-
-A recurring validated condition is still research evidence, not an instruction
-to trade.
-
-FIRST RUN
----------
-1. Upload the four complete files.
-2. Let Render redeploy.
-3. Open Balanced Contracts Lab.
-4. Confirm the eight 1s Volatility markets are checked.
-5. Ticks per market = 25,000.
-6. Stake = $1.
-7. Click "Run all balanced studies".
-8. If any market remains failed, use "Retry failed markets".
-
-Do not enable demo execution yet.
+This is still research-only.

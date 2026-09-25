@@ -3,14 +3,14 @@
 {% block content %}
 
 <section>
-  <span class="tag">MULTI-MARKET · EVEN · ODD · OVER 4 · UNDER 5</span>
-  <h3>Run the four balanced contracts across up to eight markets at once</h3>
+  <span class="tag">STEPWISE MULTI-MARKET · EVEN · ODD · OVER 4 · UNDER 5</span>
+  <h3>Run up to eight balanced-market studies without one long web request</h3>
   <p class="muted">
     The 1-second Volatility markets are selected by default when available.
-    Every selected market receives exactly the same frozen discovery → holdout
-    study and current-price check. Results are saved market-by-market, so a
-    failed or rate-limited market can be retried without rerunning completed
-    markets. This page never places a trade.
+    Clicking the button creates the batch immediately. Your browser then runs
+    one saved market at a time through separate requests, so the full eight-
+    market study is no longer trapped inside Gunicorn's single-request timeout.
+    This page never places a trade.
   </p>
 
   <form method="post">
@@ -39,14 +39,29 @@
   {% endif %}
 </section>
 
+{% if continuable %}
+<section>
+  <span class="tag">SAVED BATCH STILL PENDING</span>
+  <h3>Continue your unfinished batch</h3>
+  <p class="muted">
+    Batch {{ continuable.batch_id }} still has
+    {{ continuable.pending_count }} pending
+    market{{ continuable.pending_count|pluralize }}.
+  </p>
+  <a href="{% url 'balanced_lab' %}?batch={{ continuable.batch_id }}">
+    Continue batch
+  </a>
+</section>
+{% endif %}
+
 {% if resumable %}
 <section>
-  <span class="tag">INCOMPLETE BALANCED BATCH</span>
+  <span class="tag">FAILED MARKETS SAVED</span>
   <h3>Retry failed markets only</h3>
   <p class="muted">
-    Batch {{ resumable.batch_id }} still has {{ resumable.failed_count }}
+    Batch {{ resumable.batch_id }} has {{ resumable.failed_count }}
     failed market{{ resumable.failed_count|pluralize }}. Completed markets
-    remain saved and will not be rerun.
+    stay saved and will not be rerun.
   </p>
   <form method="post">
     {% csrf_token %}
@@ -58,23 +73,45 @@
 {% endif %}
 
 {% if result %}
+{% if result.pending %}
+<section id="batch-runner">
+  <span class="tag">BATCH {{ result.batch_id }}</span>
+  <h3>Balanced batch is running market by market</h3>
+  <p id="batch-progress" class="muted">
+    Completed {{ result.completed }} of {{ result.requested }}.
+    Failed {{ result.failed }}.
+    Pending {{ result.pending }}.
+  </p>
+  <div class="flow">
+    <div id="batch-current">Preparing next market…</div>
+    <i>→</i>
+    <div>Progress {{ result.completed }} / {{ result.requested }}</div>
+  </div>
+  <p class="muted">
+    Keep this page open for automatic processing. If you refresh or leave,
+    completed results remain saved; reopen this batch to continue the pending
+    markets.
+  </p>
+</section>
+{% endif %}
+
 <div class="cards">
-  <div class="card"><span>Engine</span><b>v{{ result.engine_version }}</b><small>Balanced batch</small></div>
+  <div class="card"><span>Engine</span><b>v{{ result.engine_version }}</b><small>Stepwise balanced batch</small></div>
   <div class="card"><span>Requested markets</span><b>{{ result.requested }}</b><small>Same frozen rules</small></div>
-  <div class="card"><span>Completed</span><b>{{ result.completed }}</b><small>{{ result.failed }} failed</small></div>
-  <div class="card"><span>Total tests</span><b>{{ result.total_tests }}</b><small>Four outcomes only</small></div>
-  <div class="card"><span>Discovery candidates</span><b>{{ result.total_discovery }}</b><small>Across markets</small></div>
+  <div class="card"><span>Completed</span><b id="completed-card">{{ result.completed }}</b><small>{{ result.pending }} pending</small></div>
+  <div class="card"><span>Failed</span><b id="failed-card">{{ result.failed }}</b><small>Retry separately</small></div>
+  <div class="card"><span>Total tests</span><b>{{ result.total_tests }}</b><small>Completed markets</small></div>
+  <div class="card"><span>Discovery candidates</span><b>{{ result.total_discovery }}</b><small>Across completed markets</small></div>
   <div class="card"><span>Validated</span><b>{{ result.total_validated }}</b><small>Survived holdout</small></div>
   <div class="card"><span>Live research candidates</span><b>{{ result.total_live }}</b><small>95% lower clears price</small></div>
-  <div class="card"><span>Cross-market recurrence</span><b>{{ result.cross_market_recurrent_count }}</b><small>Same validation on ≥2 markets</small></div>
 </div>
 
 <section>
   <h3>Balanced market comparison</h3>
   <p class="muted">
     Each probability is from the newer holdout sample. “BE” is the current
-    Deriv break-even probability from ask ÷ payout. A probability slightly
-    above 50% is not an edge unless it also clears the current contract price.
+    Deriv break-even probability from ask ÷ payout. Pending rows are processed
+    automatically one market per request.
   </p>
 
   <div class="table-wrap">
@@ -107,36 +144,28 @@
               {% if row.even.quote_ok %}
                 / {{ row.even.break_even_pct|floatformat:2 }}%
                 <br><small class="muted">edge {{ row.even.baseline_edge_pp|floatformat:2 }} pp</small>
-              {% else %}
-                / —
-              {% endif %}
+              {% else %}/ —{% endif %}
             </td>
             <td>
               {{ row.odd.p_pct|floatformat:2 }}%
               {% if row.odd.quote_ok %}
                 / {{ row.odd.break_even_pct|floatformat:2 }}%
                 <br><small class="muted">edge {{ row.odd.baseline_edge_pp|floatformat:2 }} pp</small>
-              {% else %}
-                / —
-              {% endif %}
+              {% else %}/ —{% endif %}
             </td>
             <td>
               {{ row.over4.p_pct|floatformat:2 }}%
               {% if row.over4.quote_ok %}
                 / {{ row.over4.break_even_pct|floatformat:2 }}%
                 <br><small class="muted">edge {{ row.over4.baseline_edge_pp|floatformat:2 }} pp</small>
-              {% else %}
-                / —
-              {% endif %}
+              {% else %}/ —{% endif %}
             </td>
             <td>
               {{ row.under5.p_pct|floatformat:2 }}%
               {% if row.under5.quote_ok %}
                 / {{ row.under5.break_even_pct|floatformat:2 }}%
                 <br><small class="muted">edge {{ row.under5.baseline_edge_pp|floatformat:2 }} pp</small>
-              {% else %}
-                / —
-              {% endif %}
+              {% else %}/ —{% endif %}
             </td>
             <td>{{ row.tests_run }}</td>
             <td>{{ row.discovery_candidate_count }}</td>
@@ -144,15 +173,16 @@
             <td>
               {% if row.live_candidate_count %}
                 <span class="good">{{ row.live_candidate_count }}</span>
-              {% else %}
-                0
-              {% endif %}
+              {% else %}0{% endif %}
             </td>
             <td><span class="good">COMPLETE</span></td>
+
+          {% elif row.pending %}
+            <td colspan="8"><span class="muted">Waiting to be processed</span></td>
+            <td><span class="muted">PENDING</span></td>
+
           {% else %}
-            <td colspan="8">
-              <span class="bad">{{ row.error }}</span>
-            </td>
+            <td colspan="8"><span class="bad">{{ row.error }}</span></td>
             <td><span class="bad">FAILED</span></td>
           {% endif %}
         </tr>
@@ -162,11 +192,12 @@
   </div>
 </section>
 
+{% if result.pending == 0 %}
 <section>
   <h3>Cross-market validated recurrence</h3>
   <p class="muted">
-    This section appears only when the exact same condition/outcome pair
-    independently survives holdout on at least two markets.
+    This appears only when the exact same condition/outcome pair independently
+    survives holdout on at least two completed markets.
   </p>
 
   {% if result.cross_market_recurrent %}
@@ -184,10 +215,7 @@
         <tbody>
         {% for row in result.cross_market_recurrent %}
           <tr>
-            <td>
-              {{ row.condition }}<br>
-              <small class="muted">{{ row.condition_group }}</small>
-            </td>
+            <td>{{ row.condition }}<br><small class="muted">{{ row.condition_group }}</small></td>
             <td>{{ row.outcome }}</td>
             <td>{{ row.symbol_count }}</td>
             <td>{{ row.symbols|join:", " }}</td>
@@ -195,9 +223,7 @@
               {% if row.live_symbol_count %}
                 <span class="good">{{ row.live_symbol_count }}</span>
                 <br><small class="muted">{{ row.live_symbols|join:", " }}</small>
-              {% else %}
-                0
-              {% endif %}
+              {% else %}0{% endif %}
             </td>
           </tr>
         {% endfor %}
@@ -211,6 +237,7 @@
     </p>
   {% endif %}
 </section>
+{% endif %}
 
 <section>
   <h3>Frozen balanced research gate</h3>
@@ -224,6 +251,75 @@
     <div>Live price</div>
   </div>
 </section>
+
+{% if result.pending %}
+<script>
+(function () {
+  const progress = document.getElementById("batch-progress");
+  const current = document.getElementById("batch-current");
+  const csrfInput = document.querySelector('input[name="csrfmiddlewaretoken"]');
+  const csrfToken = csrfInput ? csrfInput.value : "";
+  const stepUrl = "{% url 'balanced_batch_step' result.batch_id %}";
+  const finalUrl = "{% url 'balanced_lab' %}?batch={{ result.batch_id }}";
+  let busy = false;
+
+  async function runNextMarket() {
+    if (busy) return;
+    busy = true;
+    current.textContent = "Running next pending market…";
+
+    try {
+      const response = await fetch(stepUrl, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "X-CSRFToken": csrfToken,
+          "X-Requested-With": "XMLHttpRequest",
+          "Accept": "application/json"
+        }
+      });
+
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (parseError) {
+        throw new Error("Server returned a non-JSON response.");
+      }
+
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || "Batch step failed.");
+      }
+
+      const market = data.processed_symbol || "market";
+      const status = data.processed_status || "complete";
+
+      progress.textContent =
+        "Completed " + data.completed + " of " + data.requested +
+        ". Failed " + data.failed + ". Pending " + data.pending + ".";
+
+      current.textContent =
+        market + " → " + status.toUpperCase();
+
+      if (data.finished) {
+        window.location.href = finalUrl;
+        return;
+      }
+
+      busy = false;
+      window.setTimeout(runNextMarket, 700);
+
+    } catch (error) {
+      current.textContent = "Batch paused: " + error.message;
+      progress.textContent =
+        "Your completed markets are saved. Refresh this page to continue.";
+      busy = false;
+    }
+  }
+
+  window.setTimeout(runNextMarket, 500);
+})();
+</script>
+{% endif %}
 {% endif %}
 
 {% endblock %}

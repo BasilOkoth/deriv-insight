@@ -9,8 +9,8 @@ from .conditional import (
 from .digits import wilson
 
 
-BALANCED_ENGINE_VERSION = "1.2.2"
-RUN_TYPE = "BALANCED_V122"
+BALANCED_ENGINE_VERSION = "1.2.3"
+RUN_TYPE = "BALANCED_V123"
 BALANCED_OUTCOME_IDS = ["EVEN", "ODD", "OVER_4", "UNDER_5"]
 
 FROZEN = {
