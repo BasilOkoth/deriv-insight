@@ -354,6 +354,189 @@ class DerivPublicClient:
             "returned_count": len(all_prices),
         }
 
+
+    def latest_tick(self, symbol):
+        """Return the latest available public tick boundary for a symbol."""
+        data = self._call(
+            {
+                "ticks_history": symbol,
+                "count": 1,
+                "end": "latest",
+                "style": "ticks",
+            }
+        )
+        hist = data.get("history") or {}
+        prices = list(hist.get("prices", []))
+        times = list(hist.get("times", []))
+        if not prices or not times:
+            raise DerivAPIError(
+                f"Latest tick response was empty for {symbol}"
+            )
+
+        pip_size = data.get("pip_size")
+        try:
+            pip_size = int(pip_size) if pip_size is not None else 2
+        except (TypeError, ValueError):
+            pip_size = 2
+
+        return {
+            "price": prices[-1],
+            "epoch": int(times[-1]),
+            "pip_size": pip_size,
+        }
+
+    def ticks_between(
+        self,
+        symbol,
+        start_epoch,
+        end_epoch,
+        *,
+        chunk_seconds=900,
+    ):
+        """Fetch an explicit historical interval without looking backward.
+
+        Forward Validation uses explicit `start` and `end` epochs. The interval
+        is split into sub-1,000-second chunks so the API's normal history
+        response size cannot silently truncate a 25,000-second 1 Hz window.
+
+        No `count` is supplied for these range requests: start/end define the
+        interval. Returned ticks are filtered to the requested boundaries and
+        deduplicated by epoch.
+        """
+        start_epoch = int(start_epoch)
+        end_epoch = int(end_epoch)
+        if end_epoch < start_epoch:
+            raise DerivAPIError("end_epoch must be >= start_epoch")
+
+        chunk_seconds = max(60, min(int(chunk_seconds), 900))
+        cursor = start_epoch
+        by_epoch = {}
+        pip_size = 2
+        ws = None
+
+        try:
+            while cursor <= end_epoch:
+                segment_end = min(
+                    end_epoch,
+                    cursor + chunk_seconds - 1,
+                )
+                payload = {
+                    "ticks_history": symbol,
+                    "start": cursor,
+                    "end": str(segment_end),
+                    "style": "ticks",
+                }
+
+                page_data = None
+                last_exc = None
+
+                for attempt in range(1, self.max_retries + 1):
+                    try:
+                        if ws is None:
+                            ws = self._connect()
+
+                        if self.page_delay:
+                            time.sleep(self.page_delay)
+
+                        ws.send(json.dumps(payload))
+                        page_data = self._receive_one(ws)
+                        break
+
+                    except DerivRateLimitError as exc:
+                        last_exc = exc
+                        retry_after = None
+                        try:
+                            parsed = json.loads(str(exc))
+                            retry_after = parsed.get("retry_after")
+                        except Exception:
+                            pass
+
+                        try:
+                            if ws is not None:
+                                ws.close()
+                        except Exception:
+                            pass
+                        ws = None
+
+                        if attempt >= self.max_retries:
+                            break
+                        time.sleep(
+                            self._backoff_seconds(
+                                attempt,
+                                retry_after,
+                            )
+                        )
+
+                    except (
+                        WebSocketBadStatusException,
+                        WebSocketTimeoutException,
+                        ConnectionError,
+                        OSError,
+                    ) as exc:
+                        last_exc = exc
+                        retry_after = (
+                            self._retry_after_from_exception(exc)
+                            if self._is_rate_limit_exception(exc)
+                            else None
+                        )
+
+                        try:
+                            if ws is not None:
+                                ws.close()
+                        except Exception:
+                            pass
+                        ws = None
+
+                        if attempt >= self.max_retries:
+                            break
+                        time.sleep(
+                            self._backoff_seconds(
+                                attempt,
+                                retry_after,
+                            )
+                        )
+
+                if page_data is None:
+                    raise DerivAPIError(
+                        f"Forward history segment {cursor}-"
+                        f"{segment_end} failed for {symbol}: {last_exc}"
+                    )
+
+                hist = page_data.get("history") or {}
+                prices = list(hist.get("prices", []))
+                times = list(hist.get("times", []))
+
+                response_pip_size = page_data.get("pip_size")
+                if response_pip_size is not None:
+                    try:
+                        pip_size = int(response_pip_size)
+                    except (TypeError, ValueError):
+                        pass
+
+                for price, epoch in zip(prices, times):
+                    epoch = int(epoch)
+                    if start_epoch <= epoch <= end_epoch:
+                        by_epoch[epoch] = price
+
+                cursor = segment_end + 1
+
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+        ordered_epochs = sorted(by_epoch)
+        return {
+            "times": ordered_epochs,
+            "prices": [by_epoch[epoch] for epoch in ordered_epochs],
+            "pip_size": pip_size,
+            "start_epoch": start_epoch,
+            "end_epoch": end_epoch,
+            "returned_count": len(ordered_epochs),
+        }
+
     def proposal(
         self,
         *,

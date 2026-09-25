@@ -1,0 +1,386 @@
+{% extends "research/base.html" %}
+{% block heading %}Forward Validation Lab{% endblock %}
+{% block content %}
+
+<section>
+  <span class="tag">v1.3 · FORWARD-ONLY · NO LOOKBACK</span>
+  <h3>Pre-register a future cohort before any validation ticks exist</h3>
+  <p class="muted">
+    Arming a cohort records the latest tick epoch for every selected market.
+    Window 1 begins on the very next tick. Each future window is fixed at
+    25,000 non-overlapping ticks and uses the same frozen Even · Odd · Over 4 ·
+    Under 5 research family. Historical development ticks cannot enter these
+    windows.
+  </p>
+
+  <form method="post">
+    {% csrf_token %}
+    <div class="two">
+      <div class="card">
+        {{ form.name.as_field_group }}
+        <span>Markets</span>
+        {{ form.symbols }}
+        {% if form.symbols.errors %}
+          <div class="bad">{{ form.symbols.errors }}</div>
+        {% endif %}
+      </div>
+      <div class="card">
+        {{ form.stake.as_field_group }}
+        <p class="muted">
+          Window size is frozen at {{ forward_window_ticks }} ticks.
+          For a 1-second market, a new window needs roughly 6 hours 56 minutes
+          40 seconds of genuinely new observations.
+        </p>
+        <button type="submit">Arm new forward cohort</button>
+      </div>
+    </div>
+  </form>
+
+  {% if error %}
+    <div class="message error">{{ error }}</div>
+  {% endif %}
+</section>
+
+{% if result %}
+<div class="cards">
+  <div class="card"><span>Engine</span><b>v{{ result.cohort.engine_version }}</b><small>Forward only</small></div>
+  <div class="card"><span>Markets</span><b>{{ result.markets|length }}</b><small>Fixed at arm time</small></div>
+  <div class="card"><span>Completed windows</span><b>{{ result.completed_windows }}</b><small>Non-overlapping</small></div>
+  <div class="card"><span>Ready now</span><b>{{ result.ready_count }}</b><small>Next 25k window</small></div>
+  <div class="card"><span>Total tests</span><b>{{ result.total_tests }}</b><small>Future windows only</small></div>
+  <div class="card"><span>Validated</span><b>{{ result.total_validated }}</b><small>Holdout survived</small></div>
+  <div class="card"><span>Live candidates</span><b>{{ result.total_live }}</b><small>95% lower clears BE</small></div>
+  <div class="card"><span>Repeated effects</span><b>{{ result.recurrent_count }}</b><small>Seen in ≥2 future windows</small></div>
+</div>
+
+<section>
+  <span class="tag">COHORT {{ result.cohort.id }}</span>
+  <h3>{{ result.cohort.name }}</h3>
+  <p class="muted">
+    Created {{ result.cohort.created_at|date:"M j, Y, g:i a" }}.
+    Stake reference ${{ result.cohort.stake|floatformat:2 }}.
+    Every market below has its own immutable arm boundary.
+  </p>
+
+  <form id="forward-check-form">
+    {% csrf_token %}
+    <button type="button" id="collect-forward">
+      Check / collect next forward window
+    </button>
+  </form>
+  <p id="forward-progress" class="muted">
+    The button checks each market one at a time. If a full 25,000-tick future
+    window is not ready, that market remains waiting and no partial window is
+    saved.
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Market</th>
+          <th>Armed after tick</th>
+          <th>Next window</th>
+          <th>Approx. available</th>
+          <th>Ready boundary</th>
+          <th>Windows completed</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in result.markets %}
+        <tr
+          class="forward-market"
+          data-symbol="{{ row.symbol }}"
+          data-step-url="{% url 'forward_market_step' result.cohort.id row.id %}"
+        >
+          <td>
+            {{ row.name }}<br>
+            <small class="muted">{{ row.symbol }}</small>
+          </td>
+          <td>
+            {{ row.anchor_dt|date:"M j, g:i:s a" }} Nairobi time
+            <br><small class="muted">epoch {{ row.anchor_epoch }}</small>
+          </td>
+          <td>
+            W{{ row.windows_completed|add:"1" }}
+            <br><small class="muted">starts {{ row.next_epoch }}</small>
+          </td>
+          <td>
+            {{ row.available_estimate }} / {{ forward_window_ticks }}
+            {% if row.remaining_estimate %}
+              <br><small class="muted">{{ row.remaining_estimate }} remaining</small>
+            {% endif %}
+          </td>
+          <td>
+            {{ row.ready_dt|date:"M j, g:i:s a" }} Nairobi time
+          </td>
+          <td>{{ row.windows_completed }}</td>
+          <td>
+            {% if row.ready %}
+              <span class="good">READY</span>
+            {% else %}
+              <span class="muted">WAITING</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h3>Completed forward windows</h3>
+  {% if result.windows %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Market / window</th>
+            <th>Interval (Nairobi time)</th>
+            <th>Even P / BE</th>
+            <th>Odd P / BE</th>
+            <th>Over 4 P / BE</th>
+            <th>Under 5 P / BE</th>
+            <th>Tests</th>
+            <th>Discovery</th>
+            <th>Validated</th>
+            <th>Live</th>
+            <th>Fingerprint</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for row in result.windows %}
+          <tr>
+            <td>
+              {{ row.market.symbol }} · W{{ row.window_number }}
+            </td>
+            <td>
+              {{ row.start_dt|date:"M j, g:i:s a" }}
+              → {{ row.end_dt|date:"M j, g:i:s a" }}
+            </td>
+            <td>
+              {{ row.even.p_pct|floatformat:2 }}%
+              {% if row.even.quote_ok %}
+                / {{ row.even.break_even_pct|floatformat:2 }}%
+                <br><small class="muted">edge {{ row.even.edge_pp|floatformat:2 }} pp</small>
+              {% else %}/ —{% endif %}
+            </td>
+            <td>
+              {{ row.odd.p_pct|floatformat:2 }}%
+              {% if row.odd.quote_ok %}
+                / {{ row.odd.break_even_pct|floatformat:2 }}%
+                <br><small class="muted">edge {{ row.odd.edge_pp|floatformat:2 }} pp</small>
+              {% else %}/ —{% endif %}
+            </td>
+            <td>
+              {{ row.over4.p_pct|floatformat:2 }}%
+              {% if row.over4.quote_ok %}
+                / {{ row.over4.break_even_pct|floatformat:2 }}%
+                <br><small class="muted">edge {{ row.over4.edge_pp|floatformat:2 }} pp</small>
+              {% else %}/ —{% endif %}
+            </td>
+            <td>
+              {{ row.under5.p_pct|floatformat:2 }}%
+              {% if row.under5.quote_ok %}
+                / {{ row.under5.break_even_pct|floatformat:2 }}%
+                <br><small class="muted">edge {{ row.under5.edge_pp|floatformat:2 }} pp</small>
+              {% else %}/ —{% endif %}
+            </td>
+            <td>{{ row.tests_run }}</td>
+            <td>{{ row.discovery_candidates }}</td>
+            <td>{{ row.validated_candidates }}</td>
+            <td>
+              {% if row.live_candidates %}
+                <span class="good">{{ row.live_candidates }}</span>
+              {% else %}0{% endif %}
+            </td>
+            <td><small>{{ row.data_hash_short }}…</small></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">
+      No future window has completed yet. This is expected immediately after a
+      cohort is armed: the system refuses to backfill pre-arm ticks.
+    </p>
+  {% endif %}
+</section>
+
+<section>
+  <h3>Repeated forward effects</h3>
+  <p class="muted">
+    An effect appears here only when the exact same context + balanced contract
+    survives holdout in at least two independently completed future windows.
+  </p>
+  {% if result.recurrent %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Condition</th>
+            <th>Contract</th>
+            <th>Future windows</th>
+            <th>Distinct markets</th>
+            <th>Occurrences</th>
+            <th>Live-qualified occurrences</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for row in result.recurrent %}
+          <tr>
+            <td>{{ row.condition }}<br><small class="muted">{{ row.condition_group }}</small></td>
+            <td>{{ row.outcome }}</td>
+            <td>{{ row.window_count }}</td>
+            <td>{{ row.market_count }}</td>
+            <td><small>{{ row.windows|join:", " }}</small></td>
+            <td>
+              {% if row.live_count %}
+                <span class="good">{{ row.live_count }}</span>
+                <br><small>{{ row.live_windows|join:", " }}</small>
+              {% else %}0{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">
+      No condition has independently survived holdout in two future windows.
+    </p>
+  {% endif %}
+</section>
+
+<section>
+  <h3>Frozen v1.3 protocol</h3>
+  <div class="flow">
+    <div>Arm boundary first</div><i>→</i>
+    <div>25,000 future ticks</div><i>→</i>
+    <div>70% discovery</div><i>→</i>
+    <div>N ≥ 150</div><i>→</i>
+    <div>Uplift ≥ 0.75 pp</div><i>→</i>
+    <div>FDR q ≤ 0.10</div><i>→</i>
+    <div>30% holdout</div><i>→</i>
+    <div>Evaluation-time price</div>
+  </div>
+</section>
+
+<script>
+(function () {
+  const button = document.getElementById("collect-forward");
+  const progress = document.getElementById("forward-progress");
+  if (!button || !progress) return;
+
+  const rows = Array.from(
+    document.querySelectorAll(".forward-market")
+  );
+  const csrfInput = document.querySelector(
+    '#forward-check-form input[name="csrfmiddlewaretoken"]'
+  );
+  const csrfToken = csrfInput ? csrfInput.value : "";
+
+  button.addEventListener("click", async function () {
+    if (button.disabled) return;
+    button.disabled = true;
+
+    let completed = 0;
+    let waiting = 0;
+    let failed = 0;
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const symbol = row.dataset.symbol;
+      const url = row.dataset.stepUrl;
+
+      progress.textContent =
+        "Checking " + symbol + " (" + (i + 1) + " of " +
+        rows.length + ")…";
+
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "X-CSRFToken": csrfToken,
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "application/json"
+          }
+        });
+
+        let data = {};
+        try {
+          data = await response.json();
+        } catch (e) {
+          throw new Error("Server returned a non-JSON response.");
+        }
+
+        if (!response.ok || !data.ok) {
+          failed += 1;
+          continue;
+        }
+
+        if (data.status === "complete" ||
+            data.status === "already_advanced") {
+          completed += 1;
+        } else if (data.status === "waiting") {
+          waiting += 1;
+        }
+
+      } catch (error) {
+        failed += 1;
+      }
+    }
+
+    progress.textContent =
+      "Check finished. New windows: " + completed +
+      ". Waiting: " + waiting +
+      ". Failed checks: " + failed +
+      ". Reloading saved results…";
+
+    window.setTimeout(function () {
+      window.location.reload();
+    }, 900);
+  });
+})();
+</script>
+{% endif %}
+
+{% if recent_cohorts %}
+<section>
+  <h3>Recent forward cohorts</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Cohort</th>
+          <th>Created</th>
+          <th>Window size</th>
+          <th>Stake</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for item in recent_cohorts %}
+        <tr>
+          <td>
+            <a href="{% url 'forward_lab' %}?cohort={{ item.id }}">
+              {{ item.name }} · #{{ item.id }}
+            </a>
+          </td>
+          <td>{{ item.created_at|date:"M j, Y, g:i a" }}</td>
+          <td>{{ item.window_ticks }}</td>
+          <td>${{ item.stake|floatformat:2 }}</td>
+          <td>{{ item.status|upper }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+{% endblock %}

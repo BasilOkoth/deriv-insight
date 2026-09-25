@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from datetime import datetime, timezone as dt_timezone
 import time
 import uuid
 
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
+from django.db import transaction
 from django.db.models import Sum
 from django.http import JsonResponse
 from django.views.decorators.http import require_POST
@@ -18,6 +20,7 @@ from .forms import (
     ConditionalEdgeForm,
     CrossMarketForm,
     BalancedContractsForm,
+    ForwardCohortForm,
     EdgeForm,
     BacktestForm,
     RiskConfigForm,
@@ -28,6 +31,9 @@ from .models import (
     ProposalSnapshot,
     DemoTrade,
     DigitAggregate,
+    ForwardCohort,
+    ForwardMarket,
+    ForwardWindow,
 )
 from .services.deriv_client import (
     DerivPublicClient,
@@ -45,6 +51,14 @@ from .services.balanced import (
     BALANCED_ENGINE_VERSION,
     RUN_TYPE as BALANCED_RUN_TYPE,
     run_balanced_lab,
+)
+from .services.forward import (
+    FORWARD_ENGINE_VERSION,
+    FORWARD_WINDOW_TICKS,
+    approximate_available_ticks,
+    collect_next_window,
+    latest_boundary,
+    ready_end_epoch,
 )
 from .services.cross_market import (
     CROSS_MARKET_ENGINE_VERSION,
@@ -1540,6 +1554,335 @@ def balanced_lab(request):
             "error": error,
             "resumable": resumable,
             "continuable": continuable,
+        },
+    )
+
+
+def _forward_symbol_rows():
+    return [
+        row
+        for row in _symbols()
+        if row["code"].startswith("1HZ")
+        and "volatility" in str(row["name"] or "").lower()
+    ][:8]
+
+
+def _epoch_dt(epoch):
+    return datetime.fromtimestamp(
+        int(epoch),
+        tz=dt_timezone.utc,
+    )
+
+
+def _forward_recurrence(cohort):
+    buckets = defaultdict(
+        lambda: {
+            "windows": [],
+            "markets": [],
+            "condition": "",
+            "condition_group": "",
+            "outcome": "",
+            "live_windows": [],
+        }
+    )
+
+    windows = ForwardWindow.objects.filter(
+        market__cohort=cohort
+    ).select_related("market")
+
+    for window in windows:
+        payload = window.results or {}
+        for candidate in payload.get("validated", []):
+            key = candidate.get("candidate_key")
+            if not key:
+                continue
+            bucket = buckets[key]
+            bucket["windows"].append(
+                f"{window.market.symbol} W{window.window_number}"
+            )
+            bucket["markets"].append(window.market.symbol)
+            bucket["condition"] = candidate.get("condition", key)
+            bucket["condition_group"] = candidate.get(
+                "condition_group",
+                "",
+            )
+            bucket["outcome"] = candidate.get("outcome", "")
+            if candidate.get("live_status") == "RESEARCH CANDIDATE":
+                bucket["live_windows"].append(
+                    f"{window.market.symbol} W{window.window_number}"
+                )
+
+    rows = []
+    for key, bucket in buckets.items():
+        if len(bucket["windows"]) < 2:
+            continue
+        rows.append(
+            {
+                "key": key,
+                "condition": bucket["condition"],
+                "condition_group": bucket["condition_group"],
+                "outcome": bucket["outcome"],
+                "window_count": len(bucket["windows"]),
+                "market_count": len(set(bucket["markets"])),
+                "windows": bucket["windows"],
+                "live_count": len(bucket["live_windows"]),
+                "live_windows": bucket["live_windows"],
+            }
+        )
+
+    rows.sort(
+        key=lambda row: (
+            -row["window_count"],
+            -row["market_count"],
+            -row["live_count"],
+            row["key"],
+        )
+    )
+    return rows
+
+
+def _forward_cohort_result(cohort):
+    now_epoch = int(time.time())
+    markets = []
+
+    for market in cohort.markets.all():
+        end_epoch = ready_end_epoch(market)
+        available = approximate_available_ticks(
+            market,
+            now_epoch=now_epoch,
+        )
+        latest_window = market.windows.order_by(
+            "-window_number"
+        ).first()
+
+        markets.append(
+            {
+                "id": market.id,
+                "symbol": market.symbol,
+                "name": market.name,
+                "anchor_epoch": market.anchor_epoch,
+                "anchor_dt": _epoch_dt(market.anchor_epoch),
+                "next_epoch": market.next_epoch,
+                "next_dt": _epoch_dt(market.next_epoch),
+                "required_end_epoch": end_epoch,
+                "ready_dt": _epoch_dt(end_epoch),
+                "ready": now_epoch >= end_epoch,
+                "available_estimate": available,
+                "remaining_estimate": max(
+                    0,
+                    FORWARD_WINDOW_TICKS - available,
+                ),
+                "windows_completed": market.windows_completed,
+                "latest_window": latest_window,
+            }
+        )
+
+    windows = []
+    for window in ForwardWindow.objects.filter(
+        market__cohort=cohort
+    ).select_related("market").order_by(
+        "window_number",
+        "market__symbol",
+    ):
+        payload = window.results or {}
+        baselines = {
+            row.get("outcome_id"): row
+            for row in payload.get("baselines", [])
+        }
+
+        windows.append(
+            {
+                "id": window.id,
+                "market": window.market,
+                "window_number": window.window_number,
+                "start_dt": _epoch_dt(window.start_epoch),
+                "end_dt": _epoch_dt(window.end_epoch),
+                "tick_count": window.tick_count,
+                "tests_run": window.tests_run,
+                "discovery_candidates": window.discovery_candidates,
+                "validated_candidates": window.validated_candidates,
+                "live_candidates": window.live_candidates,
+                "data_hash_short": window.data_hash[:12],
+                "even": baselines.get("EVEN", {}),
+                "odd": baselines.get("ODD", {}),
+                "over4": baselines.get("OVER_4", {}),
+                "under5": baselines.get("UNDER_5", {}),
+            }
+        )
+
+    recurrent = _forward_recurrence(cohort)
+
+    return {
+        "cohort": cohort,
+        "markets": markets,
+        "windows": windows,
+        "completed_windows": len(windows),
+        "total_tests": sum(row["tests_run"] for row in windows),
+        "total_discovery": sum(
+            row["discovery_candidates"]
+            for row in windows
+        ),
+        "total_validated": sum(
+            row["validated_candidates"]
+            for row in windows
+        ),
+        "total_live": sum(
+            row["live_candidates"]
+            for row in windows
+        ),
+        "recurrent": recurrent,
+        "recurrent_count": len(recurrent),
+        "ready_count": sum(
+            1
+            for market in markets
+            if market["ready"]
+        ),
+    }
+
+
+@login_required
+@require_POST
+def forward_market_step(request, cohort_id, market_id):
+    try:
+        cohort = ForwardCohort.objects.get(
+            pk=cohort_id,
+            status="active",
+        )
+        market = ForwardMarket.objects.select_related(
+            "cohort"
+        ).get(
+            pk=market_id,
+            cohort=cohort,
+            active=True,
+        )
+    except (ForwardCohort.DoesNotExist, ForwardMarket.DoesNotExist):
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": "Forward cohort or market was not found.",
+            },
+            status=404,
+        )
+
+    try:
+        outcome = collect_next_window(market)
+        return JsonResponse(
+            {
+                "ok": True,
+                **outcome,
+            }
+        )
+    except Exception as exc:
+        return JsonResponse(
+            {
+                "ok": False,
+                "status": "failed",
+                "symbol": market.symbol,
+                "error": str(exc),
+            },
+            status=500,
+        )
+
+
+@login_required
+def forward_lab(request):
+    cfg = RiskConfig.current()
+    symbol_rows = _forward_symbol_rows()
+    choices = [
+        (
+            row["code"],
+            f'{row["name"]} ({row["code"]})',
+        )
+        for row in symbol_rows
+    ]
+    defaults = [row["code"] for row in symbol_rows]
+
+    form = ForwardCohortForm(
+        request.POST or None,
+        symbol_choices=choices,
+        initial_symbols=defaults,
+        initial={
+            "name": "Forward Cohort",
+            "stake": cfg.stake_usd,
+        },
+    )
+
+    error = ""
+
+    if request.method == "POST" and form.is_valid():
+        selected = form.cleaned_data["symbols"]
+        name = form.cleaned_data["name"].strip() or "Forward Cohort"
+        stake = float(form.cleaned_data["stake"])
+        name_by_code = {
+            row["code"]: row["name"]
+            for row in symbol_rows
+        }
+
+        try:
+            # Capture every no-lookback boundary before persisting the cohort.
+            # Only one latest tick per selected symbol is requested here.
+            client = DerivPublicClient()
+            boundaries = []
+            for symbol in selected:
+                boundary = latest_boundary(client, symbol)
+                boundaries.append(
+                    {
+                        "symbol": symbol,
+                        "name": name_by_code.get(symbol, symbol),
+                        "epoch": boundary["epoch"],
+                    }
+                )
+
+            with transaction.atomic():
+                cohort = ForwardCohort.objects.create(
+                    name=name,
+                    engine_version=FORWARD_ENGINE_VERSION,
+                    window_ticks=FORWARD_WINDOW_TICKS,
+                    stake=stake,
+                    status="active",
+                )
+
+                for item in boundaries:
+                    ForwardMarket.objects.create(
+                        cohort=cohort,
+                        symbol=item["symbol"],
+                        name=item["name"],
+                        anchor_epoch=item["epoch"],
+                        next_epoch=item["epoch"] + 1,
+                    )
+
+            return redirect(
+                f"{request.path}?cohort={cohort.id}"
+            )
+
+        except Exception as exc:
+            error = str(exc)
+
+    cohort = None
+    result = None
+    cohort_id = request.GET.get("cohort", "").strip()
+
+    if cohort_id:
+        try:
+            cohort = ForwardCohort.objects.prefetch_related(
+                "markets",
+            ).get(pk=int(cohort_id))
+            result = _forward_cohort_result(cohort)
+        except (ValueError, ForwardCohort.DoesNotExist):
+            error = "The requested forward cohort could not be found."
+
+    recent_cohorts = ForwardCohort.objects.all()[:10]
+
+    return render(
+        request,
+        "research/forward.html",
+        {
+            "form": form,
+            "error": error,
+            "cohort": cohort,
+            "result": result,
+            "recent_cohorts": recent_cohorts,
+            "forward_window_ticks": FORWARD_WINDOW_TICKS,
         },
     )
 

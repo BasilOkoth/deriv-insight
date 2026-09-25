@@ -181,6 +181,68 @@ class BalancedContractsForm(forms.Form):
         return values
 
 
+class ForwardCohortForm(forms.Form):
+    name = forms.CharField(
+        label="Cohort name",
+        max_length=96,
+        initial="Forward Cohort",
+    )
+    symbols = forms.MultipleChoiceField(
+        label="1-second Volatility markets",
+        choices=[],
+        widget=forms.CheckboxSelectMultiple,
+    )
+    stake = forms.DecimalField(
+        label="Reference quote stake (USD)",
+        min_value=0.35,
+        max_value=1000,
+        decimal_places=2,
+        max_digits=8,
+        initial=1,
+    )
+
+    def __init__(
+        self,
+        *args,
+        symbol_choices=None,
+        initial_symbols=None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        choices = symbol_choices or []
+        self.fields["symbols"].choices = choices
+        if not self.is_bound:
+            valid = {code for code, _label in choices}
+            selected = [
+                code
+                for code in (initial_symbols or [])
+                if code in valid
+            ]
+            self.fields["symbols"].initial = selected
+
+    def clean_symbols(self):
+        values = self.cleaned_data["symbols"]
+        if not values:
+            raise forms.ValidationError(
+                "Choose at least one 1-second Volatility market."
+            )
+        if len(values) > 8:
+            raise forms.ValidationError(
+                "Choose at most 8 markets per forward cohort."
+            )
+        invalid = [
+            symbol
+            for symbol in values
+            if not symbol.startswith("1HZ")
+        ]
+        if invalid:
+            raise forms.ValidationError(
+                "v1.3 Forward Validation accepts only 1-second "
+                "Volatility markets."
+            )
+        return values
+
+
 class EdgeForm(forms.Form):
     symbol = forms.CharField(initial="1HZ100V", max_length=32)
     contract_type = forms.ChoiceField(

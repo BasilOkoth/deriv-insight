@@ -7,6 +7,12 @@ urlpatterns = [
     path("conditional/", views.conditional_lab, name="conditional_lab"),
     path("cross-market/", views.cross_market_lab, name="cross_market_lab"),
     path("balanced/", views.balanced_lab, name="balanced_lab"),
+    path("forward/", views.forward_lab, name="forward_lab"),
+    path(
+        "forward/<int:cohort_id>/market/<int:market_id>/step/",
+        views.forward_market_step,
+        name="forward_market_step",
+    ),
     path(
         "balanced/batch/<str:batch_id>/step/",
         views.balanced_batch_step,

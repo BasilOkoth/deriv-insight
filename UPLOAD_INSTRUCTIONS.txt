@@ -1,64 +1,136 @@
-DERIV INSIGHT v1.2.3 — STEPWISE BALANCED BATCH FIX
-===================================================
+DERIV INSIGHT v1.3 — FORWARD VALIDATION LAB
+===========================================
 
-This fixes the Internal Server Error caused by running all 8 x 25,000-tick
-balanced studies inside one Gunicorn web request.
+This is a FULL-FILE upgrade package.
 
-REPLACE these COMPLETE files:
-1. research/views.py
-2. research/urls.py
-3. research/services/balanced.py
-4. research/templates/research/balanced.html
+REPLACE these complete files:
+1. research/models.py
+2. research/forms.py
+3. research/views.py
+4. research/urls.py
+5. research/templates/research/base.html
+6. research/services/deriv_client.py
 
-Everything else from v1.2.2 / v1.2.1 stays unchanged.
+ADD these complete files:
+7. research/services/forward.py
+8. research/templates/research/forward.html
+9. research/migrations/0002_forward_validation.py
 
-No database migration is required.
-No new Render service, Redis, Celery, worker, or environment variable is
-required.
-Do NOT increase Gunicorn's 120-second timeout for this fix.
+Keep all existing v1.2.3 files that are not listed above.
 
-HOW THE FIX WORKS
------------------
-Old v1.2.2:
-One browser POST tried to run all selected markets before returning HTML.
-Eight 25,000-tick markets could exceed Gunicorn --timeout 120.
+MIGRATION
+---------
+This release DOES include a database migration.
 
-New v1.2.3:
-1. "Run all balanced studies" immediately creates a saved batch.
-2. Every selected market is stored as PENDING in ResearchRun.
-3. Browser is redirected to the saved batch page.
-4. JavaScript calls a new endpoint:
-     /balanced/batch/<batch_id>/step/
-5. That endpoint processes EXACTLY ONE pending market.
-6. Result is stored COMPLETE or FAILED.
-7. Browser calls the endpoint again for the next market.
-8. When PENDING reaches zero, the page reloads and shows the final comparison.
+Your existing start.sh already runs:
+    python manage.py migrate --noinput
 
-Therefore:
-- 8 markets are no longer one 120-second request.
-- one market = one web request;
-- refresh does not lose completed results;
-- leaving the page does not delete the batch;
-- reopening the batch continues pending markets;
-- failures can be retried without rerunning completed markets.
+So Render will apply 0002_forward_validation automatically on deployment.
 
-AFTER DEPLOYMENT
-----------------
-1. Open Balanced Contracts Lab.
-2. Keep all eight 1-second Volatility markets selected.
-3. Ticks per market = 25,000.
-4. Stake = $1.
-5. Click "Run all balanced studies".
-6. You should immediately see the batch page with PENDING rows.
-7. The progress message should move market-by-market:
-     Completed 0 of 8
-     Completed 1 of 8
-     Completed 2 of 8
-     ...
-8. When complete, the final comparison table appears.
-9. If a symbol still fails after API retry/backoff, use "Retry failed markets".
+No new environment variables are required.
+No Redis/Celery/background worker is required.
+Keep DERIV_DEMO_ENABLED=false.
+
+WHAT v1.3 DOES
+--------------
+Forward Validation is intentionally different from the historical labs.
+
+When you click "Arm new forward cohort":
+1. Deriv Insight asks Deriv for the latest tick on each selected 1-second
+   Volatility market.
+2. That tick epoch is saved as the market's immutable anchor.
+3. Window 1 starts on anchor_epoch + 1.
+4. No tick at or before the anchor can enter that forward window.
+
+Each window is frozen at exactly 25,000 consecutive 1-second epochs.
+
+For a 1-second market:
+25,000 ticks ≈ 6 hours 56 minutes 40 seconds.
+
+The next window starts one epoch after the previous window's end, so windows
+do not overlap.
+
+COLLECTING A WINDOW
+-------------------
+Open the cohort and click:
+
+    Check / collect next forward window
+
+The browser checks one market per HTTP request.
+
+For each market:
+- If fewer than 25,000 future seconds have elapsed, status = WAITING.
+- If ready, the server requests the explicit start/end interval from Deriv in
+  <=900-second chunks.
+- It requires exactly 25,000 unique future tick epochs.
+- If the integrity count is wrong, NOTHING is saved.
+- If valid, the window is analyzed and saved.
+
+This avoids both:
+- the Gunicorn timeout from v1.2.2, and
+- accidental reuse of pre-arm historical ticks.
+
+FROZEN RESEARCH FAMILY
+----------------------
+The statistical family is unchanged:
+- Even
+- Odd
+- Over 4
+- Under 5
+
+Frozen gate:
+- 25,000 future ticks
+- 70% chronological discovery
+- 30% untouched holdout
+- minimum context N = 150
+- minimum discovery uplift = +0.75 percentage points
+- Benjamini-Hochberg FDR q <= 0.10
+- shrinkage = 200
+- evaluation-time live price check
+
+A live RESEARCH CANDIDATE still requires:
+- holdout validation;
+- shrunk holdout P > current break-even;
+- raw Wilson 95% lower bound > current break-even.
+
+DATA INTEGRITY
+--------------
+Each completed window stores:
+- exact start epoch;
+- exact end epoch;
+- tick count;
+- pip size;
+- SHA-256 fingerprint of epoch + raw price sequence;
+- test counts;
+- candidate counts;
+- baseline economics;
+- validated candidate summaries.
+
+The raw 25,000 prices are not permanently duplicated in the database.
+
+REPEATED FORWARD EFFECTS
+------------------------
+The Forward Validation page reports an exact context + outcome pair only when
+it independently survives holdout in at least TWO future windows.
+
+No demo or real execution is enabled.
+
+FIRST USE AFTER DEPLOYMENT
+--------------------------
+1. Open "Forward Validation Lab".
+2. Leave all active 1-second Volatility markets selected.
+3. Stake = $1.
+4. Give the cohort a name, e.g.:
+       Forward Cohort 1
+5. Click "Arm new forward cohort".
+6. Confirm every market shows its arm boundary and W1.
+7. Immediately clicking "Check / collect..." should normally show WAITING.
+   That is correct: v1.3 refuses to backfill old ticks.
+8. Return after at least ~6h 57m and click "Check / collect next forward
+   window".
+9. The markets are checked one at a time and completed windows are saved.
 
 IMPORTANT
 ---------
-Keep DERIV_DEMO_ENABLED=false.
-This is still research-only.
+Do not alter the thresholds after arming a cohort.
+Do not enable demo execution yet.

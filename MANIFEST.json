@@ -1,32 +1,57 @@
 [
   {
+    "path": "research/models.py",
+    "sha256": "95a7c8ab952addef1c3785c48c4152de30a937fd4cc0e741a9581b1682fce476",
+    "bytes": 6077
+  },
+  {
+    "path": "research/forms.py",
+    "sha256": "638c10b3eddbb8b73c216a0689d00869e20fd6e1d818446c3b6708745274593a",
+    "bytes": 8698
+  },
+  {
     "path": "research/views.py",
-    "sha256": "17eb9b707c892f99d108eaf6c9c42e0a89ca75361bf9fc0b17604408671f527c",
-    "bytes": 58825
+    "sha256": "cd5901f854a76252a68d5b4c8bb81f4abb261707c144c09ab4ffaa743e7f4fe7",
+    "bytes": 69014
   },
   {
     "path": "research/urls.py",
-    "sha256": "79c38a232848777525b0e050dd9db9eee9091a2d46d58c1627676cd6783f94a7",
-    "bytes": 798
+    "sha256": "2946da77e328791e65e1a760c3e09450dee0e57bfbe58ef59b308ad8aff9803c",
+    "bytes": 1011
   },
   {
-    "path": "research/services/balanced.py",
-    "sha256": "2acd7abe8321d8ca9b74ba8418c435e3c34d4056ec908f8fe521c8df3579a00c",
-    "bytes": 6676
+    "path": "research/templates/research/base.html",
+    "sha256": "6f76d18e394025442d2bb9b44d5072d8c82bb4d372538556ccd76054f8fd55a0",
+    "bytes": 1382
   },
   {
-    "path": "research/templates/research/balanced.html",
-    "sha256": "3caa88ecd43367616ccb41b914a1827df0d2f67b42fbeeb80be8b92431763f13",
-    "bytes": 10961
+    "path": "research/services/deriv_client.py",
+    "sha256": "6be87e2df305c9deba4f053a84bccd0bc90db6c5fa60e3426c9aca6af4154e4c",
+    "bytes": 24069
+  },
+  {
+    "path": "research/services/forward.py",
+    "sha256": "34cd136193e0a31cac85ab207e8acc3bfe3203ed93a4e3c37c27cc716226e1bd",
+    "bytes": 11459
+  },
+  {
+    "path": "research/templates/research/forward.html",
+    "sha256": "e7512843b852bd5dc41ce420d04473bf72d42c9cfb44df9e948e12d41a9d8ed0",
+    "bytes": 12309
+  },
+  {
+    "path": "research/migrations/0002_forward_validation.py",
+    "sha256": "c753f5482229959a8fe383efa387c9b9c2d0afca4e87c85a7d98558fdcd366ea",
+    "bytes": 5292
   },
   {
     "path": "UPLOAD_INSTRUCTIONS.txt",
-    "sha256": "a87f3f11db5c09177980a9e84c52e2b56e5563592cf7036166d42044b59d7fe4",
-    "bytes": 2204
+    "sha256": "e2338700c6c8d41e7c24a514186d505343549b3df4e4f1beadf9b6bdb720ca2e",
+    "bytes": 3940
   },
   {
-    "path": "README_V1_2_3.md",
-    "sha256": "baa89037848ceefd6fe8e5a2eac1695f4adfe6a2bc19eff06b04418ca2c22e1e",
-    "bytes": 1606
+    "path": "README_V1_3.md",
+    "sha256": "f6d5a9cb5bbeb19eaffcf1aa510de3fa9492d2361754e8a3d8874e8539879d0a",
+    "bytes": 2085
   }
 ]
