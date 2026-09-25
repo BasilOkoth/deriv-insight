@@ -18,9 +18,8 @@ services:
         fromDatabase:
           name: deriv-insight-db
           property: connectionString
-  # Optional later: add a paid/background worker running:
-  # python manage.py collect_digits --symbols 1HZ100V --flush 250
 
 databases:
   - name: deriv-insight-db
-    plan: free
+    plan: 0.1c-256mb
+    connectionPool: none
