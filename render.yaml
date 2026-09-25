@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: deriv-insight-web
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: ./start.sh
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.7
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: false
+      - key: DERIV_DEMO_ENABLED
+        value: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: deriv-insight-db
+          property: connectionString
+  # Optional later: add a paid/background worker running:
+  # python manage.py collect_digits --symbols 1HZ100V --flush 250
+
+databases:
+  - name: deriv-insight-db
+    plan: free
