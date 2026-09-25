@@ -1,0 +1,42 @@
+[
+  {
+    "path": "research/forms.py",
+    "sha256": "d9136ce2be9b1f800fc3d4dcfde7ea658cf1d30e38c82a31c402be71a96f7746",
+    "bytes": 4008
+  },
+  {
+    "path": "research/views.py",
+    "sha256": "463790ad02c90f788ceeeae2a3fd81857d759f536f1f4f11a8d441197df248e6",
+    "bytes": 21051
+  },
+  {
+    "path": "research/urls.py",
+    "sha256": "638789f0540ee80be7f9cd452e81817a713dcc5eb348a8f88b61782a3f1686e8",
+    "bytes": 523
+  },
+  {
+    "path": "research/services/conditional.py",
+    "sha256": "95c6a2ddfb522497557317186e72b57884de2f26d6891861f2bf49f47ac43920",
+    "bytes": 12635
+  },
+  {
+    "path": "research/templates/research/base.html",
+    "sha256": "2c9d5cc15229207b36c4e605d89923d63e2488682e74d391c7cdbe729b58635e",
+    "bytes": 1194
+  },
+  {
+    "path": "research/templates/research/conditional.html",
+    "sha256": "dc6d5d67f1577583c01f87f03a4e3ef418ad9af6b9570890f482096940b9d226",
+    "bytes": 7322
+  },
+  {
+    "path": "UPLOAD_INSTRUCTIONS.txt",
+    "sha256": "45ad49ad60c1ca55d983978aca11e57497ee2ae1d208beaa7eb7243f985329df",
+    "bytes": 1954
+  },
+  {
+    "path": "README_CONDITIONAL_V1_1.md",
+    "sha256": "3619fcd1f6c1f99c5e1333d8f477bb1192c429bfdfd03310d3303129820f36b0",
+    "bytes": 2177
+  }
+]

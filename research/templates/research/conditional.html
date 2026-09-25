@@ -1,0 +1,187 @@
+{% extends "research/base.html" %}
+{% block heading %}Conditional Edge Lab{% endblock %}
+{% block content %}
+
+<section>
+  <span class="tag">DISCOVERY → HOLDOUT → LIVE PRICING</span>
+  <h3>Search for conditional digit effects without fitting on the answer</h3>
+  <p class="muted">
+    The older part of the tick sample is used to discover conditions. Candidate
+    definitions are then frozen and tested on the newer holdout sample. Only
+    holdout-validated candidates are compared with Deriv's current proposal
+    price. This page never places a trade.
+  </p>
+
+  <form method="post" class="form-row">
+    {% csrf_token %}
+    {{ form.symbol.as_field_group }}
+    {{ form.ticks.as_field_group }}
+    {{ form.discovery_pct.as_field_group }}
+    {{ form.min_context_n.as_field_group }}
+    {{ form.min_uplift_pp.as_field_group }}
+    {{ form.fdr_q.as_field_group }}
+    {{ form.stake.as_field_group }}
+    {{ form.quote_limit.as_field_group }}
+    <button type="submit">Run conditional study</button>
+  </form>
+
+  {% if error %}
+    <div class="message error">{{ error }}</div>
+  {% endif %}
+</section>
+
+{% if result %}
+<div class="cards">
+  <div class="card"><span>Engine</span><b>v{{ result.engine_version }}</b><small>Conditional research</small></div>
+  <div class="card"><span>Total ticks</span><b>{{ result.ticks }}</b><small>{{ result.symbol }}</small></div>
+  <div class="card"><span>Discovery</span><b>{{ result.discovery_ticks }}</b><small>{{ result.discovery_pct }}% older sample</small></div>
+  <div class="card"><span>Holdout</span><b>{{ result.validation_ticks }}</b><small>Newer unseen sample</small></div>
+  <div class="card"><span>Tests</span><b>{{ result.tests_run }}</b><small>FDR corrected</small></div>
+  <div class="card"><span>Discovery candidates</span><b>{{ result.discovery_candidate_count }}</b><small>Before holdout</small></div>
+  <div class="card"><span>Validated</span><b>{{ result.validated_candidate_count }}</b><small>Survived holdout</small></div>
+  <div class="card"><span>Live-price candidates</span><b>{{ result.live_candidate_count }}</b><small>Lower 95% clears BE</small></div>
+</div>
+
+<section>
+  <h3>Pre-declared validation gate</h3>
+  <div class="flow">
+    <div>Context N ≥ {{ result.min_context_n }}</div><i>→</i>
+    <div>Discovery uplift ≥ {{ result.min_uplift_pp|floatformat:2 }} pp</div><i>→</i>
+    <div>Discovery q ≤ {{ result.fdr_q|floatformat:2 }}</div><i>→</i>
+    <div>Holdout N ≥ {{ result.min_validation_n }}</div><i>→</i>
+    <div>Positive holdout effect</div><i>→</i>
+    <div>Holdout q ≤ {{ result.fdr_q|floatformat:2 }}</div>
+  </div>
+  <p class="muted">
+    Model probabilities shown against live pricing are shrunk toward the
+    holdout-wide baseline (strength {{ result.shrink }}) to reduce small-sample
+    overconfidence. A stronger live research candidate additionally requires
+    the raw holdout 95% lower confidence bound to exceed the current
+    break-even probability.
+  </p>
+</section>
+
+<section>
+  <h3>Holdout-validated candidates + current Deriv pricing</h3>
+  {% if result.quoted %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Condition</th>
+          <th>Contract</th>
+          <th>Disc N</th>
+          <th>Disc P</th>
+          <th>Disc uplift</th>
+          <th>Disc q</th>
+          <th>Holdout N</th>
+          <th>Holdout P</th>
+          <th>Shrunk P</th>
+          <th>95% lower</th>
+          <th>Holdout uplift</th>
+          <th>Holdout q</th>
+          <th>Live BE</th>
+          <th>Model edge</th>
+          <th>Lower edge</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for c in result.quoted %}
+        <tr>
+          <td>{{ c.condition }}<br><small class="muted">{{ c.condition_group }}</small></td>
+          <td>{{ c.outcome }}</td>
+          <td>{{ c.n }}</td>
+          <td>{{ c.p|floatformat:2 }}%</td>
+          <td>{{ c.uplift_pp|floatformat:2 }} pp</td>
+          <td>{{ c.qvalue|floatformat:4 }}</td>
+          <td>{{ c.validation_n }}</td>
+          <td>{{ c.validation_p_pct|floatformat:2 }}%</td>
+          <td>{{ c.validation_shrunk_p_pct|floatformat:2 }}%</td>
+          <td>{{ c.validation_lower_pct|floatformat:2 }}%</td>
+          <td>{{ c.validation_uplift_pp|floatformat:2 }} pp</td>
+          <td>{{ c.validation_qvalue|floatformat:4 }}</td>
+          <td>{% if c.has_live_quote %}{{ c.live_break_even_pct|floatformat:2 }}%{% else %}—{% endif %}</td>
+          <td>{% if c.has_live_quote %}{{ c.live_edge_pp|floatformat:2 }} pp{% else %}—{% endif %}</td>
+          <td>{% if c.has_live_quote %}{{ c.live_lower_edge_pp|floatformat:2 }} pp{% else %}—{% endif %}</td>
+          <td>
+            {% if c.live_status == "RESEARCH CANDIDATE" %}
+              <span class="good">{{ c.live_status }}</span>
+            {% elif c.live_status == "WATCH" %}
+              {{ c.live_status }}
+            {% else %}
+              <span class="bad">{{ c.live_status }}</span>
+            {% endif %}
+            {% if c.quote_error %}<br><small class="muted">{{ c.quote_error }}</small>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <p class="muted">
+      No candidate reached the live-pricing stage in this run. That is a valid
+      research result; the system does not manufacture a signal.
+    </p>
+  {% endif %}
+</section>
+
+<section>
+  <h3>Discovery candidates and holdout verdict</h3>
+  {% if result.validation_rows %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Condition</th>
+          <th>Contract</th>
+          <th>Discovery</th>
+          <th>Disc q</th>
+          <th>Holdout</th>
+          <th>Holdout q</th>
+          <th>Verdict</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for c in result.validation_rows %}
+        <tr>
+          <td>{{ c.condition }}<br><small class="muted">{{ c.condition_group }}</small></td>
+          <td>{{ c.outcome }}</td>
+          <td>{{ c.p_pct|floatformat:2 }}% ({{ c.n }}) · +{{ c.uplift_pp|floatformat:2 }} pp</td>
+          <td>{{ c.qvalue|floatformat:4 }}</td>
+          <td>{{ c.validation_p_pct|floatformat:2 }}% ({{ c.validation_n }}) · {{ c.validation_uplift_pp|floatformat:2 }} pp</td>
+          <td>{{ c.validation_qvalue|floatformat:4 }}</td>
+          <td>
+            {% if c.holdout_pass %}
+              <span class="good">VALIDATED</span>
+            {% else %}
+              <span class="bad">REJECTED</span><br><small class="muted">{{ c.holdout_reason }}</small>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <p class="muted">
+      No discovery condition cleared the pre-declared uplift and FDR gates.
+    </p>
+  {% endif %}
+</section>
+
+<section>
+  <h3>What is being tested?</h3>
+  <p class="muted">
+    The scan includes previous digit, previous parity, high/low digit band,
+    exact two-digit sequences, two-step parity, repeated-vs-different state,
+    three-step parity and three-identical-digit streaks. Each condition is
+    evaluated across Digit Match, Differs, Over, Under, Even and Odd outcomes.
+    Exact two-digit patterns are only considered when they meet the minimum
+    observation rule.
+  </p>
+</section>
+{% endif %}
+
+{% endblock %}
