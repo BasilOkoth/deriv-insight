@@ -11,6 +11,8 @@ class DerivAPIError(RuntimeError):
 
 
 class DerivPublicClient:
+    HISTORY_PAGE_SIZE = 1000
+
     def __init__(self, timeout=15):
         self.url = settings.DERIV_PUBLIC_WS
         self.timeout = timeout
@@ -40,27 +42,26 @@ class DerivPublicClient:
         return data.get("contracts_for", {}).get("available", [])
 
     def ticks_history(self, symbol, count=5000):
-        """Fetch recent ticks in backward pages and return chronological data.
+        """Fetch recent historical ticks in 1,000-tick backward pages.
 
-        Important compatibility note:
-        Deriv's public Options WebSocket currently rejects `subscribe: 0` on
-        some deployments even though newer API documentation describes 0 as a
-        valid value. For a one-time history request, `subscribe` is optional,
-        so we omit it entirely. This works with both legacy-style and newer
-        validation rules.
+        The live Deriv endpoint may return 1,000 ticks even when a larger
+        `count` is requested. Therefore this client deliberately requests at
+        most 1,000 ticks per page and keeps paging backwards until the requested
+        total has been collected (up to 25,000 ticks).
 
-        Each request is kept at <=5,000 ticks and older pages are requested by
-        moving the `end` epoch backwards. The final result is chronological.
+        `subscribe` is omitted because this is a one-time history request.
+        Results are returned in chronological order.
         """
         target = max(100, min(int(count), 25000))
         remaining = target
         end = "latest"
         pages = []
         pip_size = 2
-        seen_first = None
+        seen_boundaries = set()
 
         while remaining > 0:
-            ask = min(5000, remaining)
+            ask = min(self.HISTORY_PAGE_SIZE, remaining)
+
             payload = {
                 "ticks_history": symbol,
                 "count": ask,
@@ -83,18 +84,32 @@ class DerivPublicClient:
             if not prices or not times:
                 break
 
-            first = int(times[0])
-            if seen_first is not None and first == seen_first:
-                break
+            usable = min(len(prices), len(times), remaining)
+            prices = prices[-usable:]
+            times = times[-usable:]
 
-            seen_first = first
+            first_epoch = int(times[0])
+            last_epoch = int(times[-1])
+            boundary = (first_epoch, last_epoch, len(times))
+
+            # Protect against an API/page boundary that stops moving backwards.
+            if boundary in seen_boundaries:
+                break
+            seen_boundaries.add(boundary)
+
             pages.append((prices, times))
-            remaining -= len(prices)
+            remaining -= usable
 
-            if len(prices) < ask:
+            if remaining <= 0:
                 break
 
-            end = first - 1
+            # If fewer than requested are returned, there is no older data
+            # available for this query boundary.
+            if usable < ask:
+                break
+
+            # Move strictly behind the oldest tick already collected.
+            end = first_epoch - 1
 
         all_prices = []
         all_times = []
@@ -110,6 +125,8 @@ class DerivPublicClient:
             "prices": all_prices,
             "times": all_times,
             "pip_size": pip_size,
+            "requested_count": target,
+            "returned_count": len(all_prices),
         }
 
     def proposal(
@@ -123,12 +140,7 @@ class DerivPublicClient:
         duration_unit="t",
         currency="USD",
     ):
-        """Request a one-time public contract proposal.
-
-        `subscribe` is deliberately omitted. We only need a single quote here,
-        and omitting the optional field avoids the same cross-version enum
-        validation problem seen on ticks_history.
-        """
+        """Request a one-time public contract proposal."""
         req = {
             "proposal": 1,
             "amount": float(stake),
@@ -210,8 +222,6 @@ class DerivDemoClient:
 
         ws = create_connection(self._authenticated_ws_url(), timeout=self.timeout)
         try:
-            # One-time authenticated proposal. Do not send subscribe: 0; omit
-            # the optional field for compatibility with current live validation.
             req = {
                 "proposal": 1,
                 "amount": float(stake),
@@ -279,8 +289,6 @@ class DerivDemoClient:
                     "settled": None,
                 }
 
-            # This one genuinely needs a subscription because we must keep
-            # receiving contract updates until the demo contract settles.
             ws.settimeout(settle_timeout)
             ws.send(
                 json.dumps(
