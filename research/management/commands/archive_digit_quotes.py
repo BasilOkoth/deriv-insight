@@ -114,7 +114,7 @@ class Command(BaseCommand):
                     lower95_pct=0,
                     edge_pp=0,
                     sample_ticks=0,
-                    decision="ARCHIVE V1.2",
+                    decision="ARCHIVE V1.2.1",
                 )
                 saved += 1
 

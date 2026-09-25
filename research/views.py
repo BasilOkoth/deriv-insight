@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+import time
+import uuid
 
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
@@ -14,6 +16,7 @@ from .forms import (
     DigitLabForm,
     ConditionalEdgeForm,
     CrossMarketForm,
+    BalancedContractsForm,
     EdgeForm,
     BacktestForm,
     RiskConfigForm,
@@ -37,6 +40,11 @@ from .services.digits import (
     threshold_backtest,
 )
 from .services.conditional import run_conditional_edge_lab
+from .services.balanced import (
+    BALANCED_ENGINE_VERSION,
+    RUN_TYPE as BALANCED_RUN_TYPE,
+    run_balanced_lab,
+)
 from .services.cross_market import (
     CROSS_MARKET_ENGINE_VERSION,
     RUN_TYPE,
@@ -327,7 +335,6 @@ def conditional_lab(request):
 
 
 def _default_cross_market_symbols(symbol_rows):
-    """Prefer currently active Volatility 1s-style markets, then fill."""
     preferred = []
     fallback = []
 
@@ -349,7 +356,6 @@ def _default_cross_market_symbols(symbol_rows):
 
 
 def _historical_candidate_recurrence(symbol, current_meta):
-    """Count validated candidate recurrence across recent saved v1.2 runs."""
     runs = list(
         ResearchRun.objects.filter(
             symbol=symbol,
@@ -362,12 +368,19 @@ def _historical_candidate_recurrence(symbol, current_meta):
 
     for run in runs:
         payload = run.results or {}
+        if payload.get("batch_status") != "complete":
+            continue
         for key in payload.get("validated_keys", []):
             counts[key] += 1
         for key, value in (payload.get("candidate_meta") or {}).items():
             meta.setdefault(key, value)
 
     recurrent = []
+    complete_runs = [
+        run for run in runs
+        if (run.results or {}).get("batch_status") == "complete"
+    ]
+
     for key, count in counts.items():
         if count < 2:
             continue
@@ -376,7 +389,7 @@ def _historical_candidate_recurrence(symbol, current_meta):
             {
                 "key": key,
                 "runs_hit": count,
-                "runs_total": len(runs),
+                "runs_total": len(complete_runs),
                 "condition": info.get("condition", key),
                 "condition_group": info.get("condition_group", ""),
                 "outcome": info.get("outcome", ""),
@@ -384,7 +397,310 @@ def _historical_candidate_recurrence(symbol, current_meta):
         )
 
     recurrent.sort(key=lambda row: (-row["runs_hit"], row["key"]))
-    return len(runs), recurrent
+    return len(complete_runs), recurrent
+
+
+def _recent_batch_runs(limit=250):
+    return list(
+        ResearchRun.objects.filter(contract_type=RUN_TYPE)
+        .order_by("-created_at")[:limit]
+    )
+
+
+def _batch_state(batch_id):
+    """Latest saved state per symbol for one migration-free batch."""
+    latest = {}
+    for run in _recent_batch_runs():
+        payload = run.results or {}
+        if payload.get("batch_id") != batch_id:
+            continue
+        if run.symbol not in latest:
+            latest[run.symbol] = run
+    return latest
+
+
+def _latest_resumable_batch():
+    """Find the newest saved batch whose latest state still has failures."""
+    seen_batch_ids = []
+    for run in _recent_batch_runs():
+        batch_id = (run.results or {}).get("batch_id")
+        if batch_id and batch_id not in seen_batch_ids:
+            seen_batch_ids.append(batch_id)
+
+    for batch_id in seen_batch_ids:
+        state = _batch_state(batch_id)
+        failed = [
+            run
+            for run in state.values()
+            if (run.results or {}).get("batch_status") == "failed"
+        ]
+        if failed:
+            return {
+                "batch_id": batch_id,
+                "failed_count": len(failed),
+                "failed_symbols": [run.symbol for run in failed],
+            }
+    return None
+
+
+def _save_batch_failure(
+    *,
+    batch_id,
+    symbol,
+    name,
+    error,
+    ticks,
+    stake,
+    should_archive,
+    batch_order,
+):
+    ResearchRun.objects.create(
+        symbol=symbol,
+        contract_type=RUN_TYPE,
+        ticks=0,
+        results={
+            "engine_version": CROSS_MARKET_ENGINE_VERSION,
+            "batch_id": batch_id,
+            "batch_status": "failed",
+            "name": name,
+            "error": str(error),
+            "requested_ticks": ticks,
+            "stake": stake,
+            "archive_quotes": should_archive,
+            "batch_order": batch_order,
+        },
+    )
+
+
+def _save_batch_complete(
+    *,
+    batch_id,
+    symbol,
+    name,
+    study,
+    ticks,
+    stake,
+    should_archive,
+    batch_order,
+    quotes_archived,
+):
+    compact_results = {
+        "engine_version": CROSS_MARKET_ENGINE_VERSION,
+        "batch_id": batch_id,
+        "batch_status": "complete",
+        "name": name,
+        "requested_ticks": ticks,
+        "stake": stake,
+        "archive_quotes": should_archive,
+        "batch_order": batch_order,
+        "quotes_archived": quotes_archived,
+        "frozen": FROZEN,
+        "ticks": study["ticks"],
+        "tests_run": study["tests_run"],
+        "discovery_candidate_count": study["discovery_candidate_count"],
+        "validated_candidate_count": study["validated_candidate_count"],
+        "validated_keys": study["validated_keys"],
+        "candidate_meta": study["candidate_meta"],
+        "rolling_recurrence": study["rolling_recurrence"][:15],
+        "window_count": study["window_count"],
+        "rolling_recurrent_count": study["rolling_recurrent_count"],
+    }
+
+    ResearchRun.objects.create(
+        symbol=symbol,
+        contract_type=RUN_TYPE,
+        ticks=study["ticks"],
+        results=compact_results,
+    )
+
+
+def _run_batch_symbols(
+    *,
+    batch_id,
+    symbols,
+    name_by_code,
+    ticks,
+    stake,
+    should_archive,
+    batch_order_map,
+):
+    """Process only the supplied symbols; every result is persisted immediately."""
+    public = DerivPublicClient()
+
+    for index, symbol in enumerate(symbols):
+        name = name_by_code.get(symbol, symbol)
+        quote_count = 0
+
+        try:
+            _data, digits = _history(symbol, ticks)
+            study = run_symbol_stability(digits)
+
+            if should_archive:
+                for quote in quote_reference_grid(public, symbol, stake=stake):
+                    if not quote["ok"]:
+                        continue
+                    ProposalSnapshot.objects.create(
+                        symbol=symbol,
+                        contract_type=quote["contract_type"],
+                        barrier=quote["barrier"] or "",
+                        stake=stake,
+                        ask_price=quote["ask_price"],
+                        payout=quote["payout"],
+                        break_even_pct=quote["break_even_pct"],
+                        model_probability_pct=0,
+                        lower95_pct=0,
+                        edge_pp=0,
+                        sample_ticks=0,
+                        decision="ARCHIVE V1.2.1",
+                    )
+                    quote_count += 1
+
+            _save_batch_complete(
+                batch_id=batch_id,
+                symbol=symbol,
+                name=name,
+                study=study,
+                ticks=ticks,
+                stake=stake,
+                should_archive=should_archive,
+                batch_order=batch_order_map.get(symbol, index),
+                quotes_archived=quote_count,
+            )
+
+        except Exception as exc:
+            _save_batch_failure(
+                batch_id=batch_id,
+                symbol=symbol,
+                name=name,
+                error=exc,
+                ticks=ticks,
+                stake=stake,
+                should_archive=should_archive,
+                batch_order=batch_order_map.get(symbol, index),
+            )
+
+        # Keep burst traffic comfortably below the documented WebSocket budget.
+        if index < len(symbols) - 1:
+            time.sleep(1.0)
+
+
+def _build_batch_result(batch_id):
+    state = _batch_state(batch_id)
+    market_rows = []
+    cross_symbol_buckets = defaultdict(
+        lambda: {
+            "symbols": [],
+            "condition": "",
+            "condition_group": "",
+            "outcome": "",
+        }
+    )
+    rolling_rows = []
+    total_tests = 0
+    total_discovery = 0
+    total_validated = 0
+    quotes_archived = 0
+
+    runs = sorted(
+        state.values(),
+        key=lambda run: (run.results or {}).get("batch_order", 999),
+    )
+
+    for run in runs:
+        payload = run.results or {}
+        ok = payload.get("batch_status") == "complete"
+        row = {
+            "symbol": run.symbol,
+            "name": payload.get("name", run.symbol),
+            "ok": ok,
+            "error": payload.get("error", ""),
+        }
+
+        if ok:
+            row.update(
+                {
+                    "ticks": payload.get("ticks", run.ticks),
+                    "window_count": payload.get("window_count", 0),
+                    "tests_run": payload.get("tests_run", 0),
+                    "discovery_candidate_count": payload.get(
+                        "discovery_candidate_count", 0
+                    ),
+                    "validated_candidate_count": payload.get(
+                        "validated_candidate_count", 0
+                    ),
+                    "rolling_recurrent_count": payload.get(
+                        "rolling_recurrent_count", 0
+                    ),
+                }
+            )
+
+            total_tests += row["tests_run"]
+            total_discovery += row["discovery_candidate_count"]
+            total_validated += row["validated_candidate_count"]
+            quotes_archived += int(payload.get("quotes_archived", 0))
+
+            prior_runs, hist_recurrent = _historical_candidate_recurrence(
+                run.symbol,
+                payload.get("candidate_meta") or {},
+            )
+            row["prior_runs"] = prior_runs
+            row["historical_recurrent_count"] = len(hist_recurrent)
+
+            for key in payload.get("validated_keys", []):
+                meta = (payload.get("candidate_meta") or {}).get(key, {})
+                bucket = cross_symbol_buckets[key]
+                bucket["symbols"].append(run.symbol)
+                bucket["condition"] = meta.get("condition", key)
+                bucket["condition_group"] = meta.get("condition_group", "")
+                bucket["outcome"] = meta.get("outcome", "")
+
+            for candidate in payload.get("rolling_recurrence", []):
+                if int(candidate.get("windows_hit", 0)) < 2:
+                    continue
+                rolling_rows.append({**candidate, "symbol": run.symbol})
+
+        market_rows.append(row)
+
+    cross_symbol = []
+    for key, bucket in cross_symbol_buckets.items():
+        symbols = sorted(set(bucket["symbols"]))
+        if len(symbols) < 2:
+            continue
+        cross_symbol.append(
+            {
+                "key": key,
+                "condition": bucket["condition"],
+                "condition_group": bucket["condition_group"],
+                "outcome": bucket["outcome"],
+                "symbol_count": len(symbols),
+                "symbols": symbols,
+            }
+        )
+
+    cross_symbol.sort(key=lambda row: (-row["symbol_count"], row["key"]))
+    rolling_rows.sort(
+        key=lambda row: (
+            -int(row.get("windows_hit", 0)),
+            float(row.get("best_q", 1)),
+            -float(row.get("avg_uplift_pp", 0)),
+        )
+    )
+
+    return {
+        "engine_version": CROSS_MARKET_ENGINE_VERSION,
+        "batch_id": batch_id,
+        "requested": len(market_rows),
+        "completed": sum(1 for row in market_rows if row["ok"]),
+        "failed": sum(1 for row in market_rows if not row["ok"]),
+        "total_tests": total_tests,
+        "total_discovery": total_discovery,
+        "total_validated": total_validated,
+        "cross_symbol_recurrent_count": len(cross_symbol),
+        "cross_symbol": cross_symbol[:30],
+        "rolling": rolling_rows[:40],
+        "quotes_archived": quotes_archived,
+        "markets": market_rows,
+    }
 
 
 @login_required
@@ -396,15 +712,11 @@ def cross_market_lab(request):
         (row["code"], f'{row["name"]} ({row["code"]})')
         for row in symbol_rows
     ]
-    name_by_code = {
-        row["code"]: row["name"]
-        for row in symbol_rows
-    }
-
+    name_by_code = {row["code"]: row["name"] for row in symbol_rows}
     defaults = _default_cross_market_symbols(symbol_rows)
 
     form = CrossMarketForm(
-        request.POST or None,
+        request.POST or None if request.POST.get("action") != "resume" else None,
         symbol_choices=choices,
         initial_symbols=defaults,
         initial={
@@ -417,189 +729,89 @@ def cross_market_lab(request):
     result = None
     error = ""
 
-    if request.method == "POST" and form.is_valid():
-        selected = form.cleaned_data["symbols"]
-        ticks = int(form.cleaned_data["ticks"])
-        stake = float(form.cleaned_data["stake"])
-        should_archive = bool(form.cleaned_data["archive_quotes"])
+    if request.method == "POST":
+        action = request.POST.get("action", "run")
 
-        market_rows = []
-        current_cross_symbol = defaultdict(
-            lambda: {
-                "symbols": [],
-                "condition": "",
-                "condition_group": "",
-                "outcome": "",
-            }
-        )
-        rolling_rows = []
-        quotes_archived = 0
-        total_tests = 0
-        total_discovery = 0
-        total_validated = 0
+        if action == "resume":
+            batch_id = request.POST.get("batch_id", "").strip()
+            state = _batch_state(batch_id)
 
-        public = DerivPublicClient()
+            if not batch_id or not state:
+                error = "Saved batch could not be found."
+            else:
+                failed_runs = [
+                    run
+                    for run in state.values()
+                    if (run.results or {}).get("batch_status") == "failed"
+                ]
 
-        for symbol in selected:
-            row = {
-                "symbol": symbol,
-                "name": name_by_code.get(symbol, symbol),
-                "ok": False,
-                "error": "",
-            }
-
-            try:
-                data, digits = _history(symbol, ticks)
-                study = run_symbol_stability(digits)
-
-                row.update(
-                    {
-                        "ok": True,
-                        "ticks": study["ticks"],
-                        "window_count": study["window_count"],
-                        "tests_run": study["tests_run"],
-                        "discovery_candidate_count": study[
-                            "discovery_candidate_count"
-                        ],
-                        "validated_candidate_count": study[
-                            "validated_candidate_count"
-                        ],
-                        "rolling_recurrent_count": study[
-                            "rolling_recurrent_count"
-                        ],
-                    }
-                )
-
-                total_tests += study["tests_run"]
-                total_discovery += study["discovery_candidate_count"]
-                total_validated += study["validated_candidate_count"]
-
-                compact_results = {
-                    "engine_version": CROSS_MARKET_ENGINE_VERSION,
-                    "frozen": FROZEN,
-                    "ticks": study["ticks"],
-                    "tests_run": study["tests_run"],
-                    "discovery_candidate_count": study[
-                        "discovery_candidate_count"
-                    ],
-                    "validated_candidate_count": study[
-                        "validated_candidate_count"
-                    ],
-                    "validated_keys": study["validated_keys"],
-                    "candidate_meta": study["candidate_meta"],
-                    "rolling_recurrence": study["rolling_recurrence"][:15],
-                    "window_count": study["window_count"],
-                }
-
-                ResearchRun.objects.create(
-                    symbol=symbol,
-                    contract_type=RUN_TYPE,
-                    ticks=study["ticks"],
-                    results=compact_results,
-                )
-
-                prior_runs, hist_recurrent = _historical_candidate_recurrence(
-                    symbol,
-                    study["candidate_meta"],
-                )
-                row["prior_runs"] = prior_runs
-                row["historical_recurrent_count"] = len(hist_recurrent)
-                row["historical_recurrent"] = hist_recurrent[:10]
-
-                for candidate in study["validated"]:
-                    key = candidate["candidate_key"]
-                    bucket = current_cross_symbol[key]
-                    bucket["symbols"].append(symbol)
-                    bucket["condition"] = candidate["condition"]
-                    bucket["condition_group"] = candidate[
-                        "condition_group"
-                    ]
-                    bucket["outcome"] = candidate["outcome"]
-
-                for candidate in study["rolling_recurrence"]:
-                    if candidate["windows_hit"] < 2:
-                        continue
-                    rolling_rows.append(
-                        {
-                            **candidate,
-                            "symbol": symbol,
-                        }
+                if failed_runs:
+                    first_payload = failed_runs[0].results or {}
+                    ticks = int(first_payload.get("requested_ticks", 25000))
+                    stake = float(first_payload.get("stake", cfg.stake_usd))
+                    should_archive = bool(
+                        first_payload.get("archive_quotes", True)
                     )
 
-                if should_archive:
-                    for quote in quote_reference_grid(
-                        public,
-                        symbol,
-                        stake=stake,
-                    ):
-                        if not quote["ok"]:
-                            continue
-
-                        ProposalSnapshot.objects.create(
-                            symbol=symbol,
-                            contract_type=quote["contract_type"],
-                            barrier=quote["barrier"] or "",
-                            stake=stake,
-                            ask_price=quote["ask_price"],
-                            payout=quote["payout"],
-                            break_even_pct=quote["break_even_pct"],
-                            model_probability_pct=0,
-                            lower95_pct=0,
-                            edge_pp=0,
-                            sample_ticks=0,
-                            decision="ARCHIVE V1.2",
+                    failed_symbols = [run.symbol for run in failed_runs]
+                    batch_order_map = {
+                        run.symbol: int(
+                            (run.results or {}).get("batch_order", index)
                         )
-                        quotes_archived += 1
+                        for index, run in enumerate(failed_runs)
+                    }
+                    saved_names = {
+                        run.symbol: (run.results or {}).get("name", run.symbol)
+                        for run in failed_runs
+                    }
+                    merged_names = {**saved_names, **name_by_code}
 
-            except Exception as exc:
-                row["error"] = str(exc)
+                    _run_batch_symbols(
+                        batch_id=batch_id,
+                        symbols=failed_symbols,
+                        name_by_code=merged_names,
+                        ticks=ticks,
+                        stake=stake,
+                        should_archive=should_archive,
+                        batch_order_map=batch_order_map,
+                    )
 
-            market_rows.append(row)
+                result = _build_batch_result(batch_id)
 
-        cross_symbol = []
-        for key, bucket in current_cross_symbol.items():
-            symbols = sorted(set(bucket["symbols"]))
-            if len(symbols) < 2:
-                continue
-            cross_symbol.append(
-                {
-                    "key": key,
-                    "condition": bucket["condition"],
-                    "condition_group": bucket["condition_group"],
-                    "outcome": bucket["outcome"],
-                    "symbol_count": len(symbols),
-                    "symbols": symbols,
-                }
+        elif form.is_valid():
+            selected = form.cleaned_data["symbols"]
+            ticks = int(form.cleaned_data["ticks"])
+            stake = float(form.cleaned_data["stake"])
+            should_archive = bool(form.cleaned_data["archive_quotes"])
+            batch_id = uuid.uuid4().hex[:12]
+
+            batch_order_map = {
+                symbol: index
+                for index, symbol in enumerate(selected)
+            }
+
+            _run_batch_symbols(
+                batch_id=batch_id,
+                symbols=selected,
+                name_by_code=name_by_code,
+                ticks=ticks,
+                stake=stake,
+                should_archive=should_archive,
+                batch_order_map=batch_order_map,
             )
+            result = _build_batch_result(batch_id)
 
-        cross_symbol.sort(
-            key=lambda row: (-row["symbol_count"], row["key"])
-        )
-        rolling_rows.sort(
-            key=lambda row: (
-                -row["windows_hit"],
-                row["best_q"],
-                -row["avg_uplift_pp"],
-            )
-        )
-
-        result = {
-            "engine_version": CROSS_MARKET_ENGINE_VERSION,
-            "requested": len(selected),
-            "completed": sum(1 for row in market_rows if row["ok"]),
-            "failed": sum(1 for row in market_rows if not row["ok"]),
-            "total_tests": total_tests,
-            "total_discovery": total_discovery,
-            "total_validated": total_validated,
-            "cross_symbol_recurrent_count": len(cross_symbol),
-            "cross_symbol": cross_symbol[:30],
-            "rolling": rolling_rows[:40],
-            "quotes_archived": quotes_archived,
-            "markets": market_rows,
+    resumable = None
+    if result and result["failed"]:
+        resumable = {
+            "batch_id": result["batch_id"],
+            "failed_count": result["failed"],
         }
+    elif not result:
+        resumable = _latest_resumable_batch()
 
     archive = ProposalSnapshot.objects.filter(
-        decision="ARCHIVE V1.2"
+        decision="ARCHIVE V1.2.1"
     ).order_by("-observed_at")[:30]
 
     return render(
@@ -610,6 +822,215 @@ def cross_market_lab(request):
             "result": result,
             "error": error,
             "archive": archive,
+            "resumable": resumable,
+        },
+    )
+
+
+@login_required
+def balanced_lab(request):
+    cfg = RiskConfig.current()
+    symbol_rows = _symbols()
+    choices = [
+        (row["code"], f'{row["name"]} ({row["code"]})')
+        for row in symbol_rows
+    ]
+
+    form = BalancedContractsForm(
+        request.POST or None,
+        symbol_choices=choices,
+        initial_symbol=cfg.default_symbol,
+        initial={
+            "ticks": "25000",
+            "stake": cfg.stake_usd,
+        },
+    )
+
+    result = None
+    error = ""
+
+    if request.method == "POST" and form.is_valid():
+        try:
+            symbol = form.cleaned_data["symbol"]
+            ticks = int(form.cleaned_data["ticks"])
+            stake = float(form.cleaned_data["stake"])
+
+            _data, digits = _history(symbol, ticks)
+            result = run_balanced_lab(digits)
+            result["symbol"] = symbol
+
+            # Fetch one current quote per pre-declared balanced outcome.
+            public = DerivPublicClient()
+            quote_map = {}
+
+            for base in result["holdout_baselines"]:
+                try:
+                    proposal = public.proposal(
+                        symbol=symbol,
+                        contract_type=base["contract_type"],
+                        barrier=base["barrier"],
+                        stake=stake,
+                        duration=1,
+                        duration_unit="t",
+                    )
+                    ask = float(proposal.get("ask_price") or stake)
+                    payout = float(proposal.get("payout") or 0)
+                    if ask <= 0 or payout <= 0:
+                        raise DerivAPIError(
+                            "Proposal did not contain usable ask/payout."
+                        )
+                    quote_map[base["outcome_id"]] = {
+                        "ok": True,
+                        "ask_price": ask,
+                        "payout": payout,
+                        "break_even": ask / payout,
+                        "error": "",
+                    }
+
+                    ProposalSnapshot.objects.create(
+                        symbol=symbol,
+                        contract_type=base["contract_type"],
+                        barrier=base["barrier"] or "",
+                        stake=stake,
+                        ask_price=ask,
+                        payout=payout,
+                        break_even_pct=ask / payout * 100,
+                        model_probability_pct=base["p"] * 100,
+                        lower95_pct=base["lower"] * 100,
+                        edge_pp=(base["p"] - ask / payout) * 100,
+                        sample_ticks=result["holdout_ticks"],
+                        decision="BALANCED V1.2.1",
+                    )
+                except Exception as exc:
+                    quote_map[base["outcome_id"]] = {
+                        "ok": False,
+                        "ask_price": None,
+                        "payout": None,
+                        "break_even": None,
+                        "error": str(exc),
+                    }
+
+            baselines = []
+            for base in result["holdout_baselines"]:
+                item = dict(base)
+                quote = quote_map[base["outcome_id"]]
+                item["p_pct"] = item["p"] * 100
+                item["lower_pct"] = item["lower"] * 100
+                item["quote_ok"] = quote["ok"]
+                item["quote_error"] = quote["error"]
+
+                if quote["ok"]:
+                    item["ask_price"] = quote["ask_price"]
+                    item["payout"] = quote["payout"]
+                    item["break_even_pct"] = quote["break_even"] * 100
+                    item["baseline_edge_pp"] = (
+                        item["p"] - quote["break_even"]
+                    ) * 100
+                    item["baseline_lower_edge_pp"] = (
+                        item["lower"] - quote["break_even"]
+                    ) * 100
+                baselines.append(item)
+
+            result["baselines"] = baselines
+
+            validation_rows = []
+            for row in result["validated"] + result["rejected"]:
+                item = dict(row)
+                quote = quote_map[item["outcome_id"]]
+
+                item["p_pct"] = item["p"] * 100
+                item["validation_p_pct"] = item["validation_p"] * 100
+                item["validation_shrunk_p_pct"] = (
+                    item["validation_shrunk_p"] * 100
+                )
+                item["validation_lower_pct"] = (
+                    item["validation_lower"] * 100
+                )
+                item["quote_ok"] = quote["ok"]
+                item["live_status"] = (
+                    "HOLDOUT REJECTED"
+                    if not item["holdout_pass"]
+                    else "QUOTE ERROR"
+                )
+
+                if quote["ok"]:
+                    be = quote["break_even"]
+                    item["break_even_pct"] = be * 100
+                    item["live_edge_pp"] = (
+                        item["validation_shrunk_p"] - be
+                    ) * 100
+                    item["live_lower_edge_pp"] = (
+                        item["validation_lower"] - be
+                    ) * 100
+
+                    if item["holdout_pass"]:
+                        if (
+                            item["live_edge_pp"] > 0
+                            and item["live_lower_edge_pp"] > 0
+                        ):
+                            item["live_status"] = "RESEARCH CANDIDATE"
+                        elif item["live_edge_pp"] > 0:
+                            item["live_status"] = "WATCH"
+                        else:
+                            item["live_status"] = "NO LIVE EDGE"
+
+                validation_rows.append(item)
+
+            validation_rows.sort(
+                key=lambda row: (
+                    not row["holdout_pass"],
+                    row["validation_qvalue"],
+                    -row["validation_uplift_pp"],
+                )
+            )
+            result["validation_rows"] = validation_rows[:50]
+            result["live_candidate_count"] = sum(
+                1
+                for row in validation_rows
+                if row["live_status"] == "RESEARCH CANDIDATE"
+            )
+
+            ResearchRun.objects.create(
+                symbol=symbol,
+                contract_type=BALANCED_RUN_TYPE,
+                ticks=result["ticks"],
+                results={
+                    "engine_version": BALANCED_ENGINE_VERSION,
+                    "ticks": result["ticks"],
+                    "tests_run": result["tests_run"],
+                    "discovery_candidate_count": result[
+                        "discovery_candidate_count"
+                    ],
+                    "validated_candidate_count": result[
+                        "validated_candidate_count"
+                    ],
+                    "live_candidate_count": result["live_candidate_count"],
+                    "validated": [
+                        {
+                            "condition": row["condition"],
+                            "condition_group": row["condition_group"],
+                            "outcome": row["outcome"],
+                            "validation_n": row["validation_n"],
+                            "validation_p": row["validation_p"],
+                            "validation_qvalue": row["validation_qvalue"],
+                            "live_status": row["live_status"],
+                        }
+                        for row in validation_rows
+                        if row["holdout_pass"]
+                    ],
+                },
+            )
+
+        except Exception as exc:
+            error = str(exc)
+
+    return render(
+        request,
+        "research/balanced.html",
+        {
+            "form": form,
+            "result": result,
+            "error": error,
         },
     )
 

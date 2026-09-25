@@ -128,6 +128,41 @@ class CrossMarketForm(forms.Form):
         return values
 
 
+class BalancedContractsForm(forms.Form):
+    symbol = forms.ChoiceField(
+        label="Synthetic market",
+        choices=[],
+    )
+    ticks = forms.ChoiceField(
+        label="Ticks",
+        choices=[("10000", "10,000"), ("25000", "25,000")],
+        initial="25000",
+    )
+    stake = forms.DecimalField(
+        label="Live quote stake (USD)",
+        min_value=0.35,
+        max_value=1000,
+        decimal_places=2,
+        max_digits=8,
+        initial=1,
+    )
+
+    def __init__(
+        self,
+        *args,
+        symbol_choices=None,
+        initial_symbol=None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        choices = symbol_choices or []
+        self.fields["symbol"].choices = choices
+        if not self.is_bound and initial_symbol:
+            valid = {code for code, _label in choices}
+            if initial_symbol in valid:
+                self.fields["symbol"].initial = initial_symbol
+
+
 class EdgeForm(forms.Form):
     symbol = forms.CharField(initial="1HZ100V", max_length=32)
     contract_type = forms.ChoiceField(

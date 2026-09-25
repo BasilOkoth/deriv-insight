@@ -9,8 +9,8 @@ from .conditional import (
 )
 
 
-CROSS_MARKET_ENGINE_VERSION = "1.2"
-RUN_TYPE = "CROSS_MARKET_V12"
+CROSS_MARKET_ENGINE_VERSION = "1.2.1"
+RUN_TYPE = "CROSS_MARKET_V121"
 
 # Frozen from the v1.1 experiment. The cross-market page does not expose these
 # as tuning knobs.
@@ -26,8 +26,8 @@ FROZEN = {
 # A compact reference grid archived on cross-market runs. A separate management
 # command can archive a larger grid continuously.
 REFERENCE_QUOTES = [
-    {"contract_type": "DIGITMATCH", "barrier": "0", "label": "Match 0"},
-    {"contract_type": "DIGITMATCH", "barrier": "5", "label": "Match 5"},
+    # v1.2.1 narrows routine price archiving to the balanced contracts we are
+    # actively researching. This reduces proposal traffic during web batches.
     {"contract_type": "DIGITOVER", "barrier": "4", "label": "Over 4"},
     {"contract_type": "DIGITUNDER", "barrier": "5", "label": "Under 5"},
     {"contract_type": "DIGITEVEN", "barrier": None, "label": "Even"},

@@ -1,90 +1,110 @@
-DERIV INSIGHT v1.2 — CROSS-MARKET & STABILITY LAB
-=================================================
+DERIV INSIGHT v1.2.1 — RATE-LIMIT RESILIENCE + BALANCED CONTRACTS
+=================================================================
 
-This package uses COMPLETE FILES. Do not paste partial patches.
+This is a FULL-FILE upgrade package. Do not apply partial patches.
 
 REPLACE these complete files:
 1. research/forms.py
 2. research/views.py
 3. research/urls.py
 4. research/templates/research/base.html
-5. research/services/deriv_client.py
-
-ADD these complete files:
-6. research/services/cross_market.py
-7. research/templates/research/cross_market.html
+5. research/templates/research/cross_market.html
+6. research/services/deriv_client.py
+7. research/services/cross_market.py
 8. research/management/commands/archive_digit_quotes.py
 
+ADD these complete files:
+9. research/services/balanced.py
+10. research/templates/research/balanced.html
+
 No database migration is required.
-No new environment variables are required.
+No new Render environment variables are required.
 Keep DERIV_DEMO_ENABLED=false.
 
-WHY deriv_client.py IS REPLACED
--------------------------------
-The existing 1,000-tick paging fix is preserved, but v1.2 keeps one WebSocket
-open for all pages of a symbol's 25,000-tick history request. This materially
-reduces connection overhead in multi-symbol studies.
+PART A — RATE LIMIT / RESUMABLE BATCHES
+---------------------------------------
+The public client now:
+- keeps one WebSocket open for historical paging whenever possible;
+- deliberately paces 1,000-tick history pages;
+- catches HTTP/WebSocket 429 RateLimit responses;
+- honors Retry-After when websocket-client exposes it;
+- otherwise uses bounded exponential backoff with jitter;
+- reconnects and retries the SAME historical page rather than restarting the
+  whole 25,000-tick history request;
+- retries transient WebSocket timeouts/transport failures.
 
-FIRST RUN
----------
-After Render deploys:
+The Cross-Market page now:
+- gives every batch a saved batch ID;
+- saves each market's COMPLETE or FAILED state immediately in ResearchRun;
+- exposes "Retry failed markets" for incomplete batches;
+- does not rerun markets already completed in that batch;
+- also offers the latest incomplete batch again after a later page reload.
 
-1. Open "Cross-Market & Stability".
-2. The market list is populated from Deriv active_symbols dynamically.
-3. Select about 5 Volatility / Synthetic markets.
-4. Ticks per market: 25,000.
-5. Reference quote stake: $1.00.
-6. Leave "Archive reference proposal prices" checked.
-7. Run the frozen batch study.
-
-The statistical settings are intentionally NOT editable:
-- Discovery: 70%
-- Min context N: 150
-- Min discovery uplift: 0.75 pp
-- FDR q: 0.10
-- Shrinkage: 200
-- Rolling window: 5,000 ticks
-
-WHAT v1.2 REPORTS
------------------
-Per market:
-- tests run
-- discovery candidates
-- validated holdout candidates
-- number of 5,000-tick windows
-- effects recurring in >=2 windows
-- recurrence of validated candidates across recent v1.2 runs
-
-Across the current batch:
-- the same validated condition recurring on >=2 different symbols
-
-PRICING ARCHIVE
----------------
-The web batch archives a compact six-contract reference grid:
-- Match 0
-- Match 5
-- Over 4
-- Under 5
+Routine web quote archiving is narrowed to:
 - Even
 - Odd
+- Over 4
+- Under 5
+This lowers proposal traffic.
 
-It stores ask price, payout, break-even probability and timestamp in the
-existing ProposalSnapshot model using decision="ARCHIVE V1.2".
+PART B — BALANCED CONTRACTS LAB
+--------------------------------
+New menu:
+Balanced Contracts Lab
 
-For one manual archive round on Render shell:
+The four pre-declared contracts are:
+- DIGITEVEN
+- DIGITODD
+- DIGITOVER barrier 4
+- DIGITUNDER barrier 5
+
+The statistical gate is frozen:
+- 70% chronological discovery
+- 30% holdout
+- minimum context N = 150
+- minimum discovery uplift = +0.75 percentage points
+- Benjamini-Hochberg FDR q <= 0.10
+- shrinkage = 200
+
+The page shows:
+1. Holdout-wide baseline probability for each of the four contracts.
+2. Wilson 95% lower confidence bound.
+3. Current ask / payout / break-even probability.
+4. Baseline edge versus the live price.
+5. Conditional discovery candidates.
+6. Holdout validation.
+7. Shrunk conditional probability.
+8. Live-price model edge and lower-confidence edge.
+
+"RESEARCH CANDIDATE" requires:
+- the condition survived discovery and holdout;
+- shrunk holdout probability exceeds current break-even;
+- raw holdout 95% lower bound also exceeds current break-even.
+
+It is still research only. It does NOT execute demo or real contracts.
+
+FIRST TEST AFTER DEPLOYMENT
+---------------------------
+1. Open Cross-Market & Stability.
+2. Select the same five markets as before.
+3. Run 25,000 ticks.
+4. If a market still fails after bounded retries, click "Retry failed markets".
+   Completed markets should not rerun.
+
+Then:
+5. Open Balanced Contracts Lab.
+6. Use 1HZ100V first.
+7. Ticks = 25,000.
+8. Stake = $1.
+9. Run the study.
+10. Share the baseline economics table and the candidate counts.
+
+CONTINUOUS PRICE ARCHIVE
+------------------------
+Manual one-shot:
 python manage.py archive_digit_quotes --symbols 1HZ100V --stake 1
 
-For a continuous paid Render background worker, for example every 5 minutes:
+Paid worker example (5-minute cadence):
 python manage.py archive_digit_quotes --symbols 1HZ100V --stake 1 --interval 300
 
-Or let the command discover up to 5 currently active synthetic markets:
-python manage.py archive_digit_quotes --stake 1 --interval 300 --limit-symbols 5
-
-Do NOT run a continuous collector on a free sleeping web service.
-
-SAFETY / INTERPRETATION
------------------------
-Rolling recurrence is diagnostic, not a trading signal.
-Cross-symbol recurrence is stronger evidence but still not proof.
-No real-money execution is added or enabled by v1.2.
-No Martingale, loss chasing, or stake escalation is introduced.
+Keep a continuous collector off a free sleeping web service.

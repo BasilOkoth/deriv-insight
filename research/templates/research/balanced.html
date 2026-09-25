@@ -1,0 +1,174 @@
+{% extends "research/base.html" %}
+{% block heading %}Balanced Contracts Lab{% endblock %}
+{% block content %}
+
+<section>
+  <span class="tag">EVEN · ODD · OVER 4 · UNDER 5</span>
+  <h3>Focused research on the four 50% baseline digit contracts</h3>
+  <p class="muted">
+    This is a pre-declared four-contract research family. It uses the same
+    chronological discovery → holdout discipline as the Conditional Edge Lab,
+    but does not spend statistical power testing Match/Differs or extreme
+    Over/Under barriers. The page never places a trade.
+  </p>
+
+  <form method="post" class="form-row">
+    {% csrf_token %}
+    {{ form.symbol.as_field_group }}
+    {{ form.ticks.as_field_group }}
+    {{ form.stake.as_field_group }}
+    <button type="submit">Run balanced-contract study</button>
+  </form>
+
+  {% if error %}
+    <div class="message error">{{ error }}</div>
+  {% endif %}
+</section>
+
+{% if result %}
+<div class="cards">
+  <div class="card"><span>Engine</span><b>v{{ result.engine_version }}</b><small>Balanced-only family</small></div>
+  <div class="card"><span>Total ticks</span><b>{{ result.ticks }}</b><small>{{ result.symbol }}</small></div>
+  <div class="card"><span>Discovery</span><b>{{ result.discovery_ticks }}</b><small>Older 70%</small></div>
+  <div class="card"><span>Holdout</span><b>{{ result.holdout_ticks }}</b><small>Newer 30%</small></div>
+  <div class="card"><span>Tests</span><b>{{ result.tests_run }}</b><small>Four outcomes only</small></div>
+  <div class="card"><span>Discovery candidates</span><b>{{ result.discovery_candidate_count }}</b><small>FDR corrected</small></div>
+  <div class="card"><span>Validated</span><b>{{ result.validated_candidate_count }}</b><small>Survived holdout</small></div>
+  <div class="card"><span>Live research candidates</span><b>{{ result.live_candidate_count }}</b><small>95% lower clears price</small></div>
+</div>
+
+<section>
+  <h3>Current economics versus holdout baseline</h3>
+  <p class="muted">
+    The holdout baseline estimates the unconditional probability in the newer
+    sample. Live break-even is calculated from the current Deriv proposal:
+    ask price ÷ payout.
+  </p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Contract</th>
+          <th>Holdout N</th>
+          <th>Holdout P</th>
+          <th>95% lower</th>
+          <th>Ask</th>
+          <th>Payout</th>
+          <th>Live BE</th>
+          <th>Baseline edge</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in result.baselines %}
+        <tr>
+          <td>{{ row.outcome }}</td>
+          <td>{{ row.n }}</td>
+          <td>{{ row.p_pct|floatformat:2 }}%</td>
+          <td>{{ row.lower_pct|floatformat:2 }}%</td>
+          {% if row.quote_ok %}
+            <td>{{ row.ask_price|floatformat:4 }}</td>
+            <td>{{ row.payout|floatformat:4 }}</td>
+            <td>{{ row.break_even_pct|floatformat:2 }}%</td>
+            <td>{{ row.baseline_edge_pp|floatformat:2 }} pp</td>
+            <td>
+              {% if row.baseline_lower_edge_pp > 0 %}
+                <span class="good">BASELINE CLEARS</span>
+              {% else %}
+                <span class="bad">NO BASELINE EDGE</span>
+              {% endif %}
+            </td>
+          {% else %}
+            <td colspan="4">—</td>
+            <td><span class="bad">QUOTE ERROR</span><br><small class="muted">{{ row.quote_error }}</small></td>
+          {% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h3>Holdout-validated conditional effects</h3>
+  {% if result.validation_rows %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Condition</th>
+            <th>Contract</th>
+            <th>Disc N</th>
+            <th>Disc P</th>
+            <th>Disc uplift</th>
+            <th>Disc q</th>
+            <th>Holdout N</th>
+            <th>Holdout P</th>
+            <th>Shrunk P</th>
+            <th>95% lower</th>
+            <th>Holdout uplift</th>
+            <th>Holdout q</th>
+            <th>Live BE</th>
+            <th>Model edge</th>
+            <th>Lower edge</th>
+            <th>Verdict</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for row in result.validation_rows %}
+          <tr>
+            <td>{{ row.condition }}<br><small class="muted">{{ row.condition_group }}</small></td>
+            <td>{{ row.outcome }}</td>
+            <td>{{ row.n }}</td>
+            <td>{{ row.p_pct|floatformat:2 }}%</td>
+            <td>{{ row.uplift_pp|floatformat:2 }} pp</td>
+            <td>{{ row.qvalue|floatformat:4 }}</td>
+            <td>{{ row.validation_n }}</td>
+            <td>{{ row.validation_p_pct|floatformat:2 }}%</td>
+            <td>{{ row.validation_shrunk_p_pct|floatformat:2 }}%</td>
+            <td>{{ row.validation_lower_pct|floatformat:2 }}%</td>
+            <td>{{ row.validation_uplift_pp|floatformat:2 }} pp</td>
+            <td>{{ row.validation_qvalue|floatformat:4 }}</td>
+            {% if row.quote_ok %}
+              <td>{{ row.break_even_pct|floatformat:2 }}%</td>
+              <td>{{ row.live_edge_pp|floatformat:2 }} pp</td>
+              <td>{{ row.live_lower_edge_pp|floatformat:2 }} pp</td>
+            {% else %}
+              <td>—</td><td>—</td><td>—</td>
+            {% endif %}
+            <td>
+              {% if row.live_status == "RESEARCH CANDIDATE" %}
+                <span class="good">{{ row.live_status }}</span>
+              {% elif row.holdout_pass %}
+                {{ row.live_status }}
+              {% else %}
+                <span class="bad">REJECTED</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">
+      No discovery condition entered holdout validation in this run.
+    </p>
+  {% endif %}
+</section>
+
+<section>
+  <h3>Frozen research gate</h3>
+  <div class="flow">
+    <div>Four balanced outcomes only</div><i>→</i>
+    <div>Discovery 70%</div><i>→</i>
+    <div>N ≥ 150</div><i>→</i>
+    <div>Uplift ≥ 0.75 pp</div><i>→</i>
+    <div>FDR q ≤ 0.10</div><i>→</i>
+    <div>Holdout</div><i>→</i>
+    <div>Live price</div>
+  </div>
+</section>
+{% endif %}
+
+{% endblock %}

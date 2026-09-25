@@ -4,9 +4,9 @@
 
 <section>
   <span class="tag">FROZEN PARAMETERS · MULTI-MARKET · STABILITY</span>
-  <h3>Run the same v1.1 research specification across synthetic markets</h3>
+  <h3>Run the same frozen research specification across synthetic markets</h3>
   <p class="muted">
-    The statistical gate is frozen at 70% discovery, minimum N 150,
+    The statistical gate remains frozen at 70% discovery, minimum N 150,
     minimum uplift 0.75 percentage points, FDR q ≤ 0.10 and shrinkage 200.
     The page also checks non-overlapping 5,000-tick stability windows and
     archives a compact set of current proposal prices. It never places trades.
@@ -35,6 +35,24 @@
     <div class="message error">{{ error }}</div>
   {% endif %}
 </section>
+
+{% if resumable %}
+<section>
+  <span class="tag">INCOMPLETE SAVED BATCH</span>
+  <h3>Resume failed markets only</h3>
+  <p class="muted">
+    Batch {{ resumable.batch_id }} has {{ resumable.failed_count }} failed
+    market{{ resumable.failed_count|pluralize }}. Completed markets will not be
+    rerun.
+  </p>
+  <form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="resume">
+    <input type="hidden" name="batch_id" value="{{ resumable.batch_id }}">
+    <button type="submit">Retry failed markets</button>
+  </form>
+</section>
+{% endif %}
 
 {% if result %}
 <div class="cards">
@@ -181,8 +199,9 @@
   <p class="muted">
     Proposal snapshots are stored with their observed timestamp so future
     research can compare probability estimates with the contract economics
-    that Deriv actually offered. The reference grid is deliberately small on
-    web runs; the included management command can collect a broader grid.
+    that Deriv actually offered. The routine v1.2.1 archive is deliberately focused on Even, Odd, Over 4
+    and Under 5 to reduce request volume; the included management command can
+    collect these reference prices repeatedly.
   </p>
   {% if archive %}
     <div class="table-wrap">
