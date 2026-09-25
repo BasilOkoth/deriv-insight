@@ -129,12 +129,13 @@ class CrossMarketForm(forms.Form):
 
 
 class BalancedContractsForm(forms.Form):
-    symbol = forms.ChoiceField(
-        label="Synthetic market",
+    symbols = forms.MultipleChoiceField(
+        label="Synthetic markets",
         choices=[],
+        widget=forms.CheckboxSelectMultiple,
     )
     ticks = forms.ChoiceField(
-        label="Ticks",
+        label="Ticks per market",
         choices=[("10000", "10,000"), ("25000", "25,000")],
         initial="25000",
     )
@@ -151,16 +152,33 @@ class BalancedContractsForm(forms.Form):
         self,
         *args,
         symbol_choices=None,
-        initial_symbol=None,
+        initial_symbols=None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         choices = symbol_choices or []
-        self.fields["symbol"].choices = choices
-        if not self.is_bound and initial_symbol:
+        self.fields["symbols"].choices = choices
+
+        if not self.is_bound:
             valid = {code for code, _label in choices}
-            if initial_symbol in valid:
-                self.fields["symbol"].initial = initial_symbol
+            selected = [
+                code
+                for code in (initial_symbols or [])
+                if code in valid
+            ]
+            self.fields["symbols"].initial = selected or [
+                code for code, _label in choices[:8]
+            ]
+
+    def clean_symbols(self):
+        values = self.cleaned_data["symbols"]
+        if not values:
+            raise forms.ValidationError("Choose at least one market.")
+        if len(values) > 8:
+            raise forms.ValidationError(
+                "Choose at most 8 markets per balanced batch."
+            )
+        return values
 
 
 class EdgeForm(forms.Form):

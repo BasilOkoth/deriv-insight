@@ -827,19 +827,501 @@ def cross_market_lab(request):
     )
 
 
+def _default_balanced_symbols(symbol_rows):
+    """Default to all active 1-second Volatility indices, capped at eight."""
+    preferred = [
+        row["code"]
+        for row in symbol_rows
+        if row["code"].startswith("1HZ")
+        and "volatility" in str(row["name"] or "").lower()
+    ]
+    return preferred[:8]
+
+
+def _recent_balanced_batch_runs(limit=300):
+    return list(
+        ResearchRun.objects.filter(contract_type=BALANCED_RUN_TYPE)
+        .order_by("-created_at")[:limit]
+    )
+
+
+def _balanced_batch_state(batch_id):
+    """Latest saved state for each symbol in one balanced batch."""
+    latest = {}
+    for run in _recent_balanced_batch_runs():
+        payload = run.results or {}
+        if payload.get("batch_id") != batch_id:
+            continue
+        if run.symbol not in latest:
+            latest[run.symbol] = run
+    return latest
+
+
+def _latest_balanced_resumable_batch():
+    seen = []
+    for run in _recent_balanced_batch_runs():
+        batch_id = (run.results or {}).get("batch_id")
+        if batch_id and batch_id not in seen:
+            seen.append(batch_id)
+
+    for batch_id in seen:
+        state = _balanced_batch_state(batch_id)
+        failed = [
+            run
+            for run in state.values()
+            if (run.results or {}).get("batch_status") == "failed"
+        ]
+        if failed:
+            return {
+                "batch_id": batch_id,
+                "failed_count": len(failed),
+                "failed_symbols": [run.symbol for run in failed],
+            }
+    return None
+
+
+def _balanced_quotes_and_rows(*, symbol, study, stake):
+    """Attach current proposal economics to the four balanced outcomes."""
+    public = DerivPublicClient()
+    quote_map = {}
+
+    for base in study["holdout_baselines"]:
+        try:
+            proposal = public.proposal(
+                symbol=symbol,
+                contract_type=base["contract_type"],
+                barrier=base["barrier"],
+                stake=stake,
+                duration=1,
+                duration_unit="t",
+            )
+            ask = float(proposal.get("ask_price") or stake)
+            payout = float(proposal.get("payout") or 0)
+            if ask <= 0 or payout <= 0:
+                raise DerivAPIError(
+                    "Proposal did not contain usable ask/payout."
+                )
+
+            break_even = ask / payout
+            quote_map[base["outcome_id"]] = {
+                "ok": True,
+                "ask_price": ask,
+                "payout": payout,
+                "break_even": break_even,
+                "error": "",
+            }
+
+            ProposalSnapshot.objects.create(
+                symbol=symbol,
+                contract_type=base["contract_type"],
+                barrier=base["barrier"] or "",
+                stake=stake,
+                ask_price=ask,
+                payout=payout,
+                break_even_pct=break_even * 100,
+                model_probability_pct=base["p"] * 100,
+                lower95_pct=base["lower"] * 100,
+                edge_pp=(base["p"] - break_even) * 100,
+                sample_ticks=study["holdout_ticks"],
+                decision="BALANCED V1.2.2",
+            )
+        except Exception as exc:
+            quote_map[base["outcome_id"]] = {
+                "ok": False,
+                "ask_price": None,
+                "payout": None,
+                "break_even": None,
+                "error": str(exc),
+            }
+
+    baselines = []
+    for base in study["holdout_baselines"]:
+        quote = quote_map[base["outcome_id"]]
+        item = {
+            "outcome_id": base["outcome_id"],
+            "outcome": base["outcome"],
+            "contract_type": base["contract_type"],
+            "barrier": base["barrier"],
+            "n": base["n"],
+            "p": base["p"],
+            "p_pct": base["p"] * 100,
+            "lower": base["lower"],
+            "lower_pct": base["lower"] * 100,
+            "quote_ok": quote["ok"],
+            "quote_error": quote["error"],
+            "ask_price": quote["ask_price"],
+            "payout": quote["payout"],
+            "break_even_pct": None,
+            "baseline_edge_pp": None,
+            "baseline_lower_edge_pp": None,
+        }
+
+        if quote["ok"]:
+            item["break_even_pct"] = quote["break_even"] * 100
+            item["baseline_edge_pp"] = (
+                base["p"] - quote["break_even"]
+            ) * 100
+            item["baseline_lower_edge_pp"] = (
+                base["lower"] - quote["break_even"]
+            ) * 100
+
+        baselines.append(item)
+
+    validation_rows = []
+    for source in study["validated"] + study["rejected"]:
+        item = dict(source)
+        quote = quote_map[item["outcome_id"]]
+
+        item["p_pct"] = item["p"] * 100
+        item["validation_p_pct"] = item["validation_p"] * 100
+        item["validation_shrunk_p_pct"] = (
+            item["validation_shrunk_p"] * 100
+        )
+        item["validation_lower_pct"] = (
+            item["validation_lower"] * 100
+        )
+        item["quote_ok"] = quote["ok"]
+        item["quote_error"] = quote["error"]
+        item["break_even_pct"] = None
+        item["live_edge_pp"] = None
+        item["live_lower_edge_pp"] = None
+        item["live_status"] = (
+            "HOLDOUT REJECTED"
+            if not item["holdout_pass"]
+            else "QUOTE ERROR"
+        )
+
+        if quote["ok"]:
+            break_even = quote["break_even"]
+            item["break_even_pct"] = break_even * 100
+            item["live_edge_pp"] = (
+                item["validation_shrunk_p"] - break_even
+            ) * 100
+            item["live_lower_edge_pp"] = (
+                item["validation_lower"] - break_even
+            ) * 100
+
+            if item["holdout_pass"]:
+                if (
+                    item["live_edge_pp"] > 0
+                    and item["live_lower_edge_pp"] > 0
+                ):
+                    item["live_status"] = "RESEARCH CANDIDATE"
+                elif item["live_edge_pp"] > 0:
+                    item["live_status"] = "WATCH"
+                else:
+                    item["live_status"] = "NO LIVE EDGE"
+
+        validation_rows.append(item)
+
+    validation_rows.sort(
+        key=lambda row: (
+            not row["holdout_pass"],
+            row["validation_qvalue"],
+            -row["validation_uplift_pp"],
+        )
+    )
+
+    return baselines, validation_rows
+
+
+def _balanced_baseline_map(baselines):
+    return {
+        row["outcome_id"]: {
+            "p_pct": row["p_pct"],
+            "lower_pct": row["lower_pct"],
+            "quote_ok": row["quote_ok"],
+            "break_even_pct": row["break_even_pct"],
+            "baseline_edge_pp": row["baseline_edge_pp"],
+            "baseline_lower_edge_pp": row["baseline_lower_edge_pp"],
+        }
+        for row in baselines
+    }
+
+
+def _save_balanced_failure(
+    *,
+    batch_id,
+    symbol,
+    name,
+    error,
+    ticks,
+    stake,
+    batch_order,
+):
+    ResearchRun.objects.create(
+        symbol=symbol,
+        contract_type=BALANCED_RUN_TYPE,
+        ticks=0,
+        results={
+            "engine_version": BALANCED_ENGINE_VERSION,
+            "batch_id": batch_id,
+            "batch_status": "failed",
+            "name": name,
+            "error": str(error),
+            "requested_ticks": ticks,
+            "stake": stake,
+            "batch_order": batch_order,
+        },
+    )
+
+
+def _save_balanced_complete(
+    *,
+    batch_id,
+    symbol,
+    name,
+    ticks,
+    stake,
+    batch_order,
+    study,
+    baselines,
+    validation_rows,
+):
+    live_candidate_count = sum(
+        1
+        for row in validation_rows
+        if row["live_status"] == "RESEARCH CANDIDATE"
+    )
+
+    validated = [
+        {
+            "candidate_key": (
+                f'{row["context_id"]}|{row["outcome_id"]}'
+            ),
+            "condition": row["condition"],
+            "condition_group": row["condition_group"],
+            "outcome": row["outcome"],
+            "validation_n": row["validation_n"],
+            "validation_p": row["validation_p"],
+            "validation_qvalue": row["validation_qvalue"],
+            "live_status": row["live_status"],
+            "live_edge_pp": row["live_edge_pp"],
+            "live_lower_edge_pp": row["live_lower_edge_pp"],
+        }
+        for row in validation_rows
+        if row["holdout_pass"]
+    ]
+
+    ResearchRun.objects.create(
+        symbol=symbol,
+        contract_type=BALANCED_RUN_TYPE,
+        ticks=study["ticks"],
+        results={
+            "engine_version": BALANCED_ENGINE_VERSION,
+            "batch_id": batch_id,
+            "batch_status": "complete",
+            "name": name,
+            "requested_ticks": ticks,
+            "stake": stake,
+            "batch_order": batch_order,
+            "ticks": study["ticks"],
+            "discovery_ticks": study["discovery_ticks"],
+            "holdout_ticks": study["holdout_ticks"],
+            "tests_run": study["tests_run"],
+            "discovery_candidate_count": study[
+                "discovery_candidate_count"
+            ],
+            "validated_candidate_count": study[
+                "validated_candidate_count"
+            ],
+            "live_candidate_count": live_candidate_count,
+            "baselines": _balanced_baseline_map(baselines),
+            "validated": validated,
+        },
+    )
+
+
+def _run_balanced_batch_symbols(
+    *,
+    batch_id,
+    symbols,
+    name_by_code,
+    ticks,
+    stake,
+    batch_order_map,
+):
+    """Run only the supplied symbols and persist each result immediately."""
+    for index, symbol in enumerate(symbols):
+        name = name_by_code.get(symbol, symbol)
+
+        try:
+            _data, digits = _history(symbol, ticks)
+            study = run_balanced_lab(digits)
+            baselines, validation_rows = _balanced_quotes_and_rows(
+                symbol=symbol,
+                study=study,
+                stake=stake,
+            )
+
+            _save_balanced_complete(
+                batch_id=batch_id,
+                symbol=symbol,
+                name=name,
+                ticks=ticks,
+                stake=stake,
+                batch_order=batch_order_map.get(symbol, index),
+                study=study,
+                baselines=baselines,
+                validation_rows=validation_rows,
+            )
+
+        except Exception as exc:
+            _save_balanced_failure(
+                batch_id=batch_id,
+                symbol=symbol,
+                name=name,
+                error=exc,
+                ticks=ticks,
+                stake=stake,
+                batch_order=batch_order_map.get(symbol, index),
+            )
+
+        # Deliberate market-to-market pacing. History paging has its own pacing
+        # and bounded 429 retry/backoff in DerivPublicClient.
+        if index < len(symbols) - 1:
+            time.sleep(1.0)
+
+
+def _build_balanced_batch_result(batch_id):
+    state = _balanced_batch_state(batch_id)
+    market_rows = []
+    recurrence = defaultdict(
+        lambda: {
+            "symbols": [],
+            "condition": "",
+            "condition_group": "",
+            "outcome": "",
+            "live_candidate_symbols": [],
+        }
+    )
+
+    total_tests = 0
+    total_discovery = 0
+    total_validated = 0
+    total_live = 0
+
+    runs = sorted(
+        state.values(),
+        key=lambda run: (run.results or {}).get("batch_order", 999),
+    )
+
+    for run in runs:
+        payload = run.results or {}
+        ok = payload.get("batch_status") == "complete"
+        row = {
+            "symbol": run.symbol,
+            "name": payload.get("name", run.symbol),
+            "ok": ok,
+            "error": payload.get("error", ""),
+        }
+
+        if ok:
+            baselines = payload.get("baselines") or {}
+            row.update(
+                {
+                    "ticks": payload.get("ticks", run.ticks),
+                    "tests_run": payload.get("tests_run", 0),
+                    "discovery_candidate_count": payload.get(
+                        "discovery_candidate_count", 0
+                    ),
+                    "validated_candidate_count": payload.get(
+                        "validated_candidate_count", 0
+                    ),
+                    "live_candidate_count": payload.get(
+                        "live_candidate_count", 0
+                    ),
+                    "even": baselines.get("EVEN", {}),
+                    "odd": baselines.get("ODD", {}),
+                    "over4": baselines.get("OVER_4", {}),
+                    "under5": baselines.get("UNDER_5", {}),
+                }
+            )
+
+            total_tests += row["tests_run"]
+            total_discovery += row["discovery_candidate_count"]
+            total_validated += row["validated_candidate_count"]
+            total_live += row["live_candidate_count"]
+
+            for candidate in payload.get("validated", []):
+                key = candidate["candidate_key"]
+                bucket = recurrence[key]
+                bucket["symbols"].append(run.symbol)
+                bucket["condition"] = candidate["condition"]
+                bucket["condition_group"] = candidate["condition_group"]
+                bucket["outcome"] = candidate["outcome"]
+                if candidate.get("live_status") == "RESEARCH CANDIDATE":
+                    bucket["live_candidate_symbols"].append(run.symbol)
+
+        market_rows.append(row)
+
+    recurrent = []
+    for key, bucket in recurrence.items():
+        symbols = sorted(set(bucket["symbols"]))
+        if len(symbols) < 2:
+            continue
+        live_symbols = sorted(set(bucket["live_candidate_symbols"]))
+        recurrent.append(
+            {
+                "key": key,
+                "condition": bucket["condition"],
+                "condition_group": bucket["condition_group"],
+                "outcome": bucket["outcome"],
+                "symbol_count": len(symbols),
+                "symbols": symbols,
+                "live_symbol_count": len(live_symbols),
+                "live_symbols": live_symbols,
+            }
+        )
+
+    recurrent.sort(
+        key=lambda row: (
+            -row["symbol_count"],
+            -row["live_symbol_count"],
+            row["key"],
+        )
+    )
+
+    return {
+        "engine_version": BALANCED_ENGINE_VERSION,
+        "batch_id": batch_id,
+        "requested": len(market_rows),
+        "completed": sum(1 for row in market_rows if row["ok"]),
+        "failed": sum(1 for row in market_rows if not row["ok"]),
+        "total_tests": total_tests,
+        "total_discovery": total_discovery,
+        "total_validated": total_validated,
+        "total_live": total_live,
+        "cross_market_recurrent_count": len(recurrent),
+        "cross_market_recurrent": recurrent[:30],
+        "markets": market_rows,
+    }
+
+
 @login_required
 def balanced_lab(request):
     cfg = RiskConfig.current()
     symbol_rows = _symbols()
+
     choices = [
         (row["code"], f'{row["name"]} ({row["code"]})')
         for row in symbol_rows
     ]
+    name_by_code = {
+        row["code"]: row["name"]
+        for row in symbol_rows
+    }
+    default_symbols = _default_balanced_symbols(symbol_rows)
+
+    is_resume = (
+        request.method == "POST"
+        and request.POST.get("action") == "resume"
+    )
 
     form = BalancedContractsForm(
-        request.POST or None,
+        None if is_resume else (request.POST or None),
         symbol_choices=choices,
-        initial_symbol=cfg.default_symbol,
+        initial_symbols=default_symbols,
         initial={
             "ticks": "25000",
             "stake": cfg.stake_usd,
@@ -849,180 +1331,95 @@ def balanced_lab(request):
     result = None
     error = ""
 
-    if request.method == "POST" and form.is_valid():
-        try:
-            symbol = form.cleaned_data["symbol"]
+    if request.method == "POST":
+        action = request.POST.get("action", "run")
+
+        if action == "resume":
+            batch_id = request.POST.get("batch_id", "").strip()
+            state = _balanced_batch_state(batch_id)
+
+            if not batch_id or not state:
+                error = "Saved balanced batch could not be found."
+            else:
+                failed_runs = [
+                    run
+                    for run in state.values()
+                    if (run.results or {}).get("batch_status") == "failed"
+                ]
+
+                if failed_runs:
+                    first_payload = failed_runs[0].results or {}
+                    ticks = int(
+                        first_payload.get("requested_ticks", 25000)
+                    )
+                    stake = float(
+                        first_payload.get("stake", cfg.stake_usd)
+                    )
+
+                    failed_symbols = [
+                        run.symbol
+                        for run in failed_runs
+                    ]
+                    batch_order_map = {
+                        run.symbol: int(
+                            (run.results or {}).get(
+                                "batch_order",
+                                index,
+                            )
+                        )
+                        for index, run in enumerate(failed_runs)
+                    }
+                    saved_names = {
+                        run.symbol: (run.results or {}).get(
+                            "name",
+                            run.symbol,
+                        )
+                        for run in failed_runs
+                    }
+
+                    _run_balanced_batch_symbols(
+                        batch_id=batch_id,
+                        symbols=failed_symbols,
+                        name_by_code={
+                            **saved_names,
+                            **name_by_code,
+                        },
+                        ticks=ticks,
+                        stake=stake,
+                        batch_order_map=batch_order_map,
+                    )
+
+                result = _build_balanced_batch_result(batch_id)
+
+        elif form.is_valid():
+            selected = form.cleaned_data["symbols"]
             ticks = int(form.cleaned_data["ticks"])
             stake = float(form.cleaned_data["stake"])
+            batch_id = uuid.uuid4().hex[:12]
 
-            _data, digits = _history(symbol, ticks)
-            result = run_balanced_lab(digits)
-            result["symbol"] = symbol
+            batch_order_map = {
+                symbol: index
+                for index, symbol in enumerate(selected)
+            }
 
-            # Fetch one current quote per pre-declared balanced outcome.
-            public = DerivPublicClient()
-            quote_map = {}
-
-            for base in result["holdout_baselines"]:
-                try:
-                    proposal = public.proposal(
-                        symbol=symbol,
-                        contract_type=base["contract_type"],
-                        barrier=base["barrier"],
-                        stake=stake,
-                        duration=1,
-                        duration_unit="t",
-                    )
-                    ask = float(proposal.get("ask_price") or stake)
-                    payout = float(proposal.get("payout") or 0)
-                    if ask <= 0 or payout <= 0:
-                        raise DerivAPIError(
-                            "Proposal did not contain usable ask/payout."
-                        )
-                    quote_map[base["outcome_id"]] = {
-                        "ok": True,
-                        "ask_price": ask,
-                        "payout": payout,
-                        "break_even": ask / payout,
-                        "error": "",
-                    }
-
-                    ProposalSnapshot.objects.create(
-                        symbol=symbol,
-                        contract_type=base["contract_type"],
-                        barrier=base["barrier"] or "",
-                        stake=stake,
-                        ask_price=ask,
-                        payout=payout,
-                        break_even_pct=ask / payout * 100,
-                        model_probability_pct=base["p"] * 100,
-                        lower95_pct=base["lower"] * 100,
-                        edge_pp=(base["p"] - ask / payout) * 100,
-                        sample_ticks=result["holdout_ticks"],
-                        decision="BALANCED V1.2.1",
-                    )
-                except Exception as exc:
-                    quote_map[base["outcome_id"]] = {
-                        "ok": False,
-                        "ask_price": None,
-                        "payout": None,
-                        "break_even": None,
-                        "error": str(exc),
-                    }
-
-            baselines = []
-            for base in result["holdout_baselines"]:
-                item = dict(base)
-                quote = quote_map[base["outcome_id"]]
-                item["p_pct"] = item["p"] * 100
-                item["lower_pct"] = item["lower"] * 100
-                item["quote_ok"] = quote["ok"]
-                item["quote_error"] = quote["error"]
-
-                if quote["ok"]:
-                    item["ask_price"] = quote["ask_price"]
-                    item["payout"] = quote["payout"]
-                    item["break_even_pct"] = quote["break_even"] * 100
-                    item["baseline_edge_pp"] = (
-                        item["p"] - quote["break_even"]
-                    ) * 100
-                    item["baseline_lower_edge_pp"] = (
-                        item["lower"] - quote["break_even"]
-                    ) * 100
-                baselines.append(item)
-
-            result["baselines"] = baselines
-
-            validation_rows = []
-            for row in result["validated"] + result["rejected"]:
-                item = dict(row)
-                quote = quote_map[item["outcome_id"]]
-
-                item["p_pct"] = item["p"] * 100
-                item["validation_p_pct"] = item["validation_p"] * 100
-                item["validation_shrunk_p_pct"] = (
-                    item["validation_shrunk_p"] * 100
-                )
-                item["validation_lower_pct"] = (
-                    item["validation_lower"] * 100
-                )
-                item["quote_ok"] = quote["ok"]
-                item["live_status"] = (
-                    "HOLDOUT REJECTED"
-                    if not item["holdout_pass"]
-                    else "QUOTE ERROR"
-                )
-
-                if quote["ok"]:
-                    be = quote["break_even"]
-                    item["break_even_pct"] = be * 100
-                    item["live_edge_pp"] = (
-                        item["validation_shrunk_p"] - be
-                    ) * 100
-                    item["live_lower_edge_pp"] = (
-                        item["validation_lower"] - be
-                    ) * 100
-
-                    if item["holdout_pass"]:
-                        if (
-                            item["live_edge_pp"] > 0
-                            and item["live_lower_edge_pp"] > 0
-                        ):
-                            item["live_status"] = "RESEARCH CANDIDATE"
-                        elif item["live_edge_pp"] > 0:
-                            item["live_status"] = "WATCH"
-                        else:
-                            item["live_status"] = "NO LIVE EDGE"
-
-                validation_rows.append(item)
-
-            validation_rows.sort(
-                key=lambda row: (
-                    not row["holdout_pass"],
-                    row["validation_qvalue"],
-                    -row["validation_uplift_pp"],
-                )
+            _run_balanced_batch_symbols(
+                batch_id=batch_id,
+                symbols=selected,
+                name_by_code=name_by_code,
+                ticks=ticks,
+                stake=stake,
+                batch_order_map=batch_order_map,
             )
-            result["validation_rows"] = validation_rows[:50]
-            result["live_candidate_count"] = sum(
-                1
-                for row in validation_rows
-                if row["live_status"] == "RESEARCH CANDIDATE"
-            )
+            result = _build_balanced_batch_result(batch_id)
 
-            ResearchRun.objects.create(
-                symbol=symbol,
-                contract_type=BALANCED_RUN_TYPE,
-                ticks=result["ticks"],
-                results={
-                    "engine_version": BALANCED_ENGINE_VERSION,
-                    "ticks": result["ticks"],
-                    "tests_run": result["tests_run"],
-                    "discovery_candidate_count": result[
-                        "discovery_candidate_count"
-                    ],
-                    "validated_candidate_count": result[
-                        "validated_candidate_count"
-                    ],
-                    "live_candidate_count": result["live_candidate_count"],
-                    "validated": [
-                        {
-                            "condition": row["condition"],
-                            "condition_group": row["condition_group"],
-                            "outcome": row["outcome"],
-                            "validation_n": row["validation_n"],
-                            "validation_p": row["validation_p"],
-                            "validation_qvalue": row["validation_qvalue"],
-                            "live_status": row["live_status"],
-                        }
-                        for row in validation_rows
-                        if row["holdout_pass"]
-                    ],
-                },
-            )
-
-        except Exception as exc:
-            error = str(exc)
+    resumable = None
+    if result and result["failed"]:
+        resumable = {
+            "batch_id": result["batch_id"],
+            "failed_count": result["failed"],
+        }
+    elif not result:
+        resumable = _latest_balanced_resumable_batch()
 
     return render(
         request,
@@ -1031,6 +1428,7 @@ def balanced_lab(request):
             "form": form,
             "result": result,
             "error": error,
+            "resumable": resumable,
         },
     )
 

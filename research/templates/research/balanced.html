@@ -3,21 +3,35 @@
 {% block content %}
 
 <section>
-  <span class="tag">EVEN · ODD · OVER 4 · UNDER 5</span>
-  <h3>Focused research on the four 50% baseline digit contracts</h3>
+  <span class="tag">MULTI-MARKET · EVEN · ODD · OVER 4 · UNDER 5</span>
+  <h3>Run the four balanced contracts across up to eight markets at once</h3>
   <p class="muted">
-    This is a pre-declared four-contract research family. It uses the same
-    chronological discovery → holdout discipline as the Conditional Edge Lab,
-    but does not spend statistical power testing Match/Differs or extreme
-    Over/Under barriers. The page never places a trade.
+    The 1-second Volatility markets are selected by default when available.
+    Every selected market receives exactly the same frozen discovery → holdout
+    study and current-price check. Results are saved market-by-market, so a
+    failed or rate-limited market can be retried without rerunning completed
+    markets. This page never places a trade.
   </p>
 
-  <form method="post" class="form-row">
+  <form method="post">
     {% csrf_token %}
-    {{ form.symbol.as_field_group }}
-    {{ form.ticks.as_field_group }}
-    {{ form.stake.as_field_group }}
-    <button type="submit">Run balanced-contract study</button>
+    <input type="hidden" name="action" value="run">
+    <div class="two">
+      <div class="card">
+        <span>Markets</span>
+        {{ form.symbols }}
+        {% if form.symbols.errors %}
+          <div class="bad">{{ form.symbols.errors }}</div>
+        {% endif %}
+      </div>
+      <div class="card">
+        <div class="settings-form">
+          {{ form.ticks.as_field_group }}
+          {{ form.stake.as_field_group }}
+        </div>
+        <button type="submit">Run all balanced studies</button>
+      </div>
+    </div>
   </form>
 
   {% if error %}
@@ -25,62 +39,121 @@
   {% endif %}
 </section>
 
+{% if resumable %}
+<section>
+  <span class="tag">INCOMPLETE BALANCED BATCH</span>
+  <h3>Retry failed markets only</h3>
+  <p class="muted">
+    Batch {{ resumable.batch_id }} still has {{ resumable.failed_count }}
+    failed market{{ resumable.failed_count|pluralize }}. Completed markets
+    remain saved and will not be rerun.
+  </p>
+  <form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="resume">
+    <input type="hidden" name="batch_id" value="{{ resumable.batch_id }}">
+    <button type="submit">Retry failed markets</button>
+  </form>
+</section>
+{% endif %}
+
 {% if result %}
 <div class="cards">
-  <div class="card"><span>Engine</span><b>v{{ result.engine_version }}</b><small>Balanced-only family</small></div>
-  <div class="card"><span>Total ticks</span><b>{{ result.ticks }}</b><small>{{ result.symbol }}</small></div>
-  <div class="card"><span>Discovery</span><b>{{ result.discovery_ticks }}</b><small>Older 70%</small></div>
-  <div class="card"><span>Holdout</span><b>{{ result.holdout_ticks }}</b><small>Newer 30%</small></div>
-  <div class="card"><span>Tests</span><b>{{ result.tests_run }}</b><small>Four outcomes only</small></div>
-  <div class="card"><span>Discovery candidates</span><b>{{ result.discovery_candidate_count }}</b><small>FDR corrected</small></div>
-  <div class="card"><span>Validated</span><b>{{ result.validated_candidate_count }}</b><small>Survived holdout</small></div>
-  <div class="card"><span>Live research candidates</span><b>{{ result.live_candidate_count }}</b><small>95% lower clears price</small></div>
+  <div class="card"><span>Engine</span><b>v{{ result.engine_version }}</b><small>Balanced batch</small></div>
+  <div class="card"><span>Requested markets</span><b>{{ result.requested }}</b><small>Same frozen rules</small></div>
+  <div class="card"><span>Completed</span><b>{{ result.completed }}</b><small>{{ result.failed }} failed</small></div>
+  <div class="card"><span>Total tests</span><b>{{ result.total_tests }}</b><small>Four outcomes only</small></div>
+  <div class="card"><span>Discovery candidates</span><b>{{ result.total_discovery }}</b><small>Across markets</small></div>
+  <div class="card"><span>Validated</span><b>{{ result.total_validated }}</b><small>Survived holdout</small></div>
+  <div class="card"><span>Live research candidates</span><b>{{ result.total_live }}</b><small>95% lower clears price</small></div>
+  <div class="card"><span>Cross-market recurrence</span><b>{{ result.cross_market_recurrent_count }}</b><small>Same validation on ≥2 markets</small></div>
 </div>
 
 <section>
-  <h3>Current economics versus holdout baseline</h3>
+  <h3>Balanced market comparison</h3>
   <p class="muted">
-    The holdout baseline estimates the unconditional probability in the newer
-    sample. Live break-even is calculated from the current Deriv proposal:
-    ask price ÷ payout.
+    Each probability is from the newer holdout sample. “BE” is the current
+    Deriv break-even probability from ask ÷ payout. A probability slightly
+    above 50% is not an edge unless it also clears the current contract price.
   </p>
+
   <div class="table-wrap">
     <table>
       <thead>
         <tr>
-          <th>Contract</th>
-          <th>Holdout N</th>
-          <th>Holdout P</th>
-          <th>95% lower</th>
-          <th>Ask</th>
-          <th>Payout</th>
-          <th>Live BE</th>
-          <th>Baseline edge</th>
+          <th>Market</th>
+          <th>Even P / BE</th>
+          <th>Odd P / BE</th>
+          <th>Over 4 P / BE</th>
+          <th>Under 5 P / BE</th>
+          <th>Tests</th>
+          <th>Discovery</th>
+          <th>Validated</th>
+          <th>Live candidates</th>
           <th>Status</th>
         </tr>
       </thead>
       <tbody>
-      {% for row in result.baselines %}
+      {% for row in result.markets %}
         <tr>
-          <td>{{ row.outcome }}</td>
-          <td>{{ row.n }}</td>
-          <td>{{ row.p_pct|floatformat:2 }}%</td>
-          <td>{{ row.lower_pct|floatformat:2 }}%</td>
-          {% if row.quote_ok %}
-            <td>{{ row.ask_price|floatformat:4 }}</td>
-            <td>{{ row.payout|floatformat:4 }}</td>
-            <td>{{ row.break_even_pct|floatformat:2 }}%</td>
-            <td>{{ row.baseline_edge_pp|floatformat:2 }} pp</td>
+          <td>
+            {{ row.name }}<br>
+            <small class="muted">{{ row.symbol }}</small>
+          </td>
+
+          {% if row.ok %}
             <td>
-              {% if row.baseline_lower_edge_pp > 0 %}
-                <span class="good">BASELINE CLEARS</span>
+              {{ row.even.p_pct|floatformat:2 }}%
+              {% if row.even.quote_ok %}
+                / {{ row.even.break_even_pct|floatformat:2 }}%
+                <br><small class="muted">edge {{ row.even.baseline_edge_pp|floatformat:2 }} pp</small>
               {% else %}
-                <span class="bad">NO BASELINE EDGE</span>
+                / —
               {% endif %}
             </td>
+            <td>
+              {{ row.odd.p_pct|floatformat:2 }}%
+              {% if row.odd.quote_ok %}
+                / {{ row.odd.break_even_pct|floatformat:2 }}%
+                <br><small class="muted">edge {{ row.odd.baseline_edge_pp|floatformat:2 }} pp</small>
+              {% else %}
+                / —
+              {% endif %}
+            </td>
+            <td>
+              {{ row.over4.p_pct|floatformat:2 }}%
+              {% if row.over4.quote_ok %}
+                / {{ row.over4.break_even_pct|floatformat:2 }}%
+                <br><small class="muted">edge {{ row.over4.baseline_edge_pp|floatformat:2 }} pp</small>
+              {% else %}
+                / —
+              {% endif %}
+            </td>
+            <td>
+              {{ row.under5.p_pct|floatformat:2 }}%
+              {% if row.under5.quote_ok %}
+                / {{ row.under5.break_even_pct|floatformat:2 }}%
+                <br><small class="muted">edge {{ row.under5.baseline_edge_pp|floatformat:2 }} pp</small>
+              {% else %}
+                / —
+              {% endif %}
+            </td>
+            <td>{{ row.tests_run }}</td>
+            <td>{{ row.discovery_candidate_count }}</td>
+            <td>{{ row.validated_candidate_count }}</td>
+            <td>
+              {% if row.live_candidate_count %}
+                <span class="good">{{ row.live_candidate_count }}</span>
+              {% else %}
+                0
+              {% endif %}
+            </td>
+            <td><span class="good">COMPLETE</span></td>
           {% else %}
-            <td colspan="4">—</td>
-            <td><span class="bad">QUOTE ERROR</span><br><small class="muted">{{ row.quote_error }}</small></td>
+            <td colspan="8">
+              <span class="bad">{{ row.error }}</span>
+            </td>
+            <td><span class="bad">FAILED</span></td>
           {% endif %}
         </tr>
       {% endfor %}
@@ -90,59 +163,40 @@
 </section>
 
 <section>
-  <h3>Holdout-validated conditional effects</h3>
-  {% if result.validation_rows %}
+  <h3>Cross-market validated recurrence</h3>
+  <p class="muted">
+    This section appears only when the exact same condition/outcome pair
+    independently survives holdout on at least two markets.
+  </p>
+
+  {% if result.cross_market_recurrent %}
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
             <th>Condition</th>
             <th>Contract</th>
-            <th>Disc N</th>
-            <th>Disc P</th>
-            <th>Disc uplift</th>
-            <th>Disc q</th>
-            <th>Holdout N</th>
-            <th>Holdout P</th>
-            <th>Shrunk P</th>
-            <th>95% lower</th>
-            <th>Holdout uplift</th>
-            <th>Holdout q</th>
-            <th>Live BE</th>
-            <th>Model edge</th>
-            <th>Lower edge</th>
-            <th>Verdict</th>
+            <th>Validated markets</th>
+            <th>Markets</th>
+            <th>Live-price candidates</th>
           </tr>
         </thead>
         <tbody>
-        {% for row in result.validation_rows %}
+        {% for row in result.cross_market_recurrent %}
           <tr>
-            <td>{{ row.condition }}<br><small class="muted">{{ row.condition_group }}</small></td>
-            <td>{{ row.outcome }}</td>
-            <td>{{ row.n }}</td>
-            <td>{{ row.p_pct|floatformat:2 }}%</td>
-            <td>{{ row.uplift_pp|floatformat:2 }} pp</td>
-            <td>{{ row.qvalue|floatformat:4 }}</td>
-            <td>{{ row.validation_n }}</td>
-            <td>{{ row.validation_p_pct|floatformat:2 }}%</td>
-            <td>{{ row.validation_shrunk_p_pct|floatformat:2 }}%</td>
-            <td>{{ row.validation_lower_pct|floatformat:2 }}%</td>
-            <td>{{ row.validation_uplift_pp|floatformat:2 }} pp</td>
-            <td>{{ row.validation_qvalue|floatformat:4 }}</td>
-            {% if row.quote_ok %}
-              <td>{{ row.break_even_pct|floatformat:2 }}%</td>
-              <td>{{ row.live_edge_pp|floatformat:2 }} pp</td>
-              <td>{{ row.live_lower_edge_pp|floatformat:2 }} pp</td>
-            {% else %}
-              <td>—</td><td>—</td><td>—</td>
-            {% endif %}
             <td>
-              {% if row.live_status == "RESEARCH CANDIDATE" %}
-                <span class="good">{{ row.live_status }}</span>
-              {% elif row.holdout_pass %}
-                {{ row.live_status }}
+              {{ row.condition }}<br>
+              <small class="muted">{{ row.condition_group }}</small>
+            </td>
+            <td>{{ row.outcome }}</td>
+            <td>{{ row.symbol_count }}</td>
+            <td>{{ row.symbols|join:", " }}</td>
+            <td>
+              {% if row.live_symbol_count %}
+                <span class="good">{{ row.live_symbol_count }}</span>
+                <br><small class="muted">{{ row.live_symbols|join:", " }}</small>
               {% else %}
-                <span class="bad">REJECTED</span>
+                0
               {% endif %}
             </td>
           </tr>
@@ -152,15 +206,16 @@
     </div>
   {% else %}
     <p class="muted">
-      No discovery condition entered holdout validation in this run.
+      No exact balanced condition independently validated on two or more
+      selected markets in this batch.
     </p>
   {% endif %}
 </section>
 
 <section>
-  <h3>Frozen research gate</h3>
+  <h3>Frozen balanced research gate</h3>
   <div class="flow">
-    <div>Four balanced outcomes only</div><i>→</i>
+    <div>Even · Odd · Over 4 · Under 5</div><i>→</i>
     <div>Discovery 70%</div><i>→</i>
     <div>N ≥ 150</div><i>→</i>
     <div>Uplift ≥ 0.75 pp</div><i>→</i>

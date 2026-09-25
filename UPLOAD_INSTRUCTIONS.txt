@@ -1,110 +1,91 @@
-DERIV INSIGHT v1.2.1 — RATE-LIMIT RESILIENCE + BALANCED CONTRACTS
-=================================================================
+DERIV INSIGHT v1.2.2 — MULTI-MARKET BALANCED BATCH
+===================================================
 
-This is a FULL-FILE upgrade package. Do not apply partial patches.
+This package contains COMPLETE files. Do not paste partial patches.
 
 REPLACE these complete files:
 1. research/forms.py
 2. research/views.py
-3. research/urls.py
-4. research/templates/research/base.html
-5. research/templates/research/cross_market.html
-6. research/services/deriv_client.py
-7. research/services/cross_market.py
-8. research/management/commands/archive_digit_quotes.py
+3. research/services/balanced.py
+4. research/templates/research/balanced.html
 
-ADD these complete files:
-9. research/services/balanced.py
-10. research/templates/research/balanced.html
+Everything else from v1.2.1 stays unchanged.
 
 No database migration is required.
-No new Render environment variables are required.
+No new environment variable is required.
 Keep DERIV_DEMO_ENABLED=false.
 
-PART A — RATE LIMIT / RESUMABLE BATCHES
----------------------------------------
-The public client now:
-- keeps one WebSocket open for historical paging whenever possible;
-- deliberately paces 1,000-tick history pages;
-- catches HTTP/WebSocket 429 RateLimit responses;
-- honors Retry-After when websocket-client exposes it;
-- otherwise uses bounded exponential backoff with jitter;
-- reconnects and retries the SAME historical page rather than restarting the
-  whole 25,000-tick history request;
-- retries transient WebSocket timeouts/transport failures.
+WHAT CHANGES
+------------
+Balanced Contracts Lab is now multi-market.
 
-The Cross-Market page now:
-- gives every batch a saved batch ID;
-- saves each market's COMPLETE or FAILED state immediately in ResearchRun;
-- exposes "Retry failed markets" for incomplete batches;
-- does not rerun markets already completed in that batch;
-- also offers the latest incomplete batch again after a later page reload.
+When the page opens, currently active 1-second Volatility markets are selected
+by default, up to eight:
+- 1HZ10V
+- 1HZ15V
+- 1HZ25V
+- 1HZ30V
+- 1HZ50V
+- 1HZ75V
+- 1HZ90V
+- 1HZ100V
+(only symbols actually returned by Deriv are shown/selected)
 
-Routine web quote archiving is narrowed to:
-- Even
-- Odd
-- Over 4
-- Under 5
-This lowers proposal traffic.
+You can select up to eight markets and click:
 
-PART B — BALANCED CONTRACTS LAB
---------------------------------
-New menu:
-Balanced Contracts Lab
+RUN ALL BALANCED STUDIES
 
-The four pre-declared contracts are:
-- DIGITEVEN
-- DIGITODD
-- DIGITOVER barrier 4
-- DIGITUNDER barrier 5
+Each selected market gets:
+- 25,000 ticks (or 10,000 if chosen)
+- 70% discovery / 30% holdout
+- four pre-declared outcomes only:
+  * Even
+  * Odd
+  * Over 4
+  * Under 5
+- min context N 150
+- min discovery uplift +0.75 pp
+- BH-FDR q <= 0.10
+- live ask/payout check
 
-The statistical gate is frozen:
-- 70% chronological discovery
-- 30% holdout
-- minimum context N = 150
-- minimum discovery uplift = +0.75 percentage points
-- Benjamini-Hochberg FDR q <= 0.10
-- shrinkage = 200
+The consolidated comparison shows:
+- Even probability / live break-even
+- Odd probability / live break-even
+- Over 4 probability / live break-even
+- Under 5 probability / live break-even
+- tests
+- discovery candidates
+- validated candidates
+- live research candidates
 
-The page shows:
-1. Holdout-wide baseline probability for each of the four contracts.
-2. Wilson 95% lower confidence bound.
-3. Current ask / payout / break-even probability.
-4. Baseline edge versus the live price.
-5. Conditional discovery candidates.
-6. Holdout validation.
-7. Shrunk conditional probability.
-8. Live-price model edge and lower-confidence edge.
+RESUMABLE
+---------
+Every market is saved immediately in the existing ResearchRun table.
 
-"RESEARCH CANDIDATE" requires:
-- the condition survived discovery and holdout;
-- shrunk holdout probability exceeds current break-even;
-- raw holdout 95% lower bound also exceeds current break-even.
+If any market fails after the v1.2.1 rate-limit retries, the page shows:
 
-It is still research only. It does NOT execute demo or real contracts.
+RETRY FAILED MARKETS
 
-FIRST TEST AFTER DEPLOYMENT
----------------------------
-1. Open Cross-Market & Stability.
-2. Select the same five markets as before.
-3. Run 25,000 ticks.
-4. If a market still fails after bounded retries, click "Retry failed markets".
-   Completed markets should not rerun.
+That button reruns only failed markets for that saved batch.
+Completed markets are not repeated.
 
-Then:
-5. Open Balanced Contracts Lab.
-6. Use 1HZ100V first.
-7. Ticks = 25,000.
-8. Stake = $1.
-9. Run the study.
-10. Share the baseline economics table and the candidate counts.
+CROSS-MARKET RECURRENCE
+-----------------------
+If the exact same condition/outcome pair independently survives holdout on two
+or more markets, the page reports it in a separate recurrence table.
 
-CONTINUOUS PRICE ARCHIVE
-------------------------
-Manual one-shot:
-python manage.py archive_digit_quotes --symbols 1HZ100V --stake 1
+A recurring validated condition is still research evidence, not an instruction
+to trade.
 
-Paid worker example (5-minute cadence):
-python manage.py archive_digit_quotes --symbols 1HZ100V --stake 1 --interval 300
+FIRST RUN
+---------
+1. Upload the four complete files.
+2. Let Render redeploy.
+3. Open Balanced Contracts Lab.
+4. Confirm the eight 1s Volatility markets are checked.
+5. Ticks per market = 25,000.
+6. Stake = $1.
+7. Click "Run all balanced studies".
+8. If any market remains failed, use "Retry failed markets".
 
-Keep a continuous collector off a free sleeping web service.
+Do not enable demo execution yet.
