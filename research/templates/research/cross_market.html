@@ -1,0 +1,222 @@
+{% extends "research/base.html" %}
+{% block heading %}Cross-Market & Stability Lab{% endblock %}
+{% block content %}
+
+<section>
+  <span class="tag">FROZEN PARAMETERS · MULTI-MARKET · STABILITY</span>
+  <h3>Run the same v1.1 research specification across synthetic markets</h3>
+  <p class="muted">
+    The statistical gate is frozen at 70% discovery, minimum N 150,
+    minimum uplift 0.75 percentage points, FDR q ≤ 0.10 and shrinkage 200.
+    The page also checks non-overlapping 5,000-tick stability windows and
+    archives a compact set of current proposal prices. It never places trades.
+  </p>
+
+  <form method="post">
+    {% csrf_token %}
+    <div class="two">
+      <div class="card">
+        <span>Markets</span>
+        {{ form.symbols }}
+        {% if form.symbols.errors %}<div class="bad">{{ form.symbols.errors }}</div>{% endif %}
+      </div>
+      <div class="card">
+        <div class="settings-form">
+          {{ form.ticks.as_field_group }}
+          {{ form.stake.as_field_group }}
+          {{ form.archive_quotes.as_field_group }}
+        </div>
+        <button type="submit">Run frozen batch study</button>
+      </div>
+    </div>
+  </form>
+
+  {% if error %}
+    <div class="message error">{{ error }}</div>
+  {% endif %}
+</section>
+
+{% if result %}
+<div class="cards">
+  <div class="card"><span>Engine</span><b>v{{ result.engine_version }}</b><small>Cross-market research</small></div>
+  <div class="card"><span>Requested markets</span><b>{{ result.requested }}</b><small>Same frozen rules</small></div>
+  <div class="card"><span>Completed</span><b>{{ result.completed }}</b><small>{{ result.failed }} failed</small></div>
+  <div class="card"><span>Total tests</span><b>{{ result.total_tests }}</b><small>Across completed markets</small></div>
+  <div class="card"><span>Discovery candidates</span><b>{{ result.total_discovery }}</b><small>Before holdout</small></div>
+  <div class="card"><span>Validated</span><b>{{ result.total_validated }}</b><small>Across all markets</small></div>
+  <div class="card"><span>Cross-symbol recurrence</span><b>{{ result.cross_symbol_recurrent_count }}</b><small>Validated on ≥2 markets</small></div>
+  <div class="card"><span>Quotes archived</span><b>{{ result.quotes_archived }}</b><small>Proposal economics</small></div>
+</div>
+
+<section>
+  <h3>Frozen specification</h3>
+  <div class="flow">
+    <div>Discovery 70%</div><i>→</i>
+    <div>N ≥ 150</div><i>→</i>
+    <div>Uplift ≥ 0.75 pp</div><i>→</i>
+    <div>FDR q ≤ 0.10</div><i>→</i>
+    <div>Holdout validation</div><i>→</i>
+    <div>5,000-tick stability windows</div>
+  </div>
+</section>
+
+<section>
+  <h3>Market comparison</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Market</th>
+          <th>Ticks</th>
+          <th>Windows</th>
+          <th>Tests</th>
+          <th>Discovery</th>
+          <th>Validated</th>
+          <th>Rolling recurrent</th>
+          <th>Prior runs</th>
+          <th>Historically recurring validated</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in result.markets %}
+        <tr>
+          <td>{{ row.name }}<br><small class="muted">{{ row.symbol }}</small></td>
+          {% if row.ok %}
+            <td>{{ row.ticks }}</td>
+            <td>{{ row.window_count }}</td>
+            <td>{{ row.tests_run }}</td>
+            <td>{{ row.discovery_candidate_count }}</td>
+            <td>{{ row.validated_candidate_count }}</td>
+            <td>{{ row.rolling_recurrent_count }}</td>
+            <td>{{ row.prior_runs }}</td>
+            <td>{{ row.historical_recurrent_count }}</td>
+            <td><span class="good">COMPLETE</span></td>
+          {% else %}
+            <td colspan="8"><span class="bad">{{ row.error }}</span></td>
+            <td><span class="bad">FAILED</span></td>
+          {% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h3>Cross-symbol validated recurrence</h3>
+  {% if result.cross_symbol %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Condition</th>
+            <th>Contract</th>
+            <th>Markets validated</th>
+            <th>Markets</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for c in result.cross_symbol %}
+          <tr>
+            <td>{{ c.condition }}<br><small class="muted">{{ c.condition_group }}</small></td>
+            <td>{{ c.outcome }}</td>
+            <td>{{ c.symbol_count }}</td>
+            <td>{{ c.symbols|join:", " }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">
+      No condition was independently validated on two or more selected markets
+      in this batch.
+    </p>
+  {% endif %}
+</section>
+
+<section>
+  <h3>Rolling-window recurrence</h3>
+  <p class="muted">
+    These are discovery-gate effects that reappeared in at least two separate
+    5,000-tick windows. They are diagnostic recurrence, not trade signals.
+  </p>
+  {% if result.rolling %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Market</th>
+            <th>Condition</th>
+            <th>Contract</th>
+            <th>Windows hit</th>
+            <th>Recurrence</th>
+            <th>Avg uplift</th>
+            <th>Best q</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for c in result.rolling %}
+          <tr>
+            <td>{{ c.symbol }}</td>
+            <td>{{ c.condition }}<br><small class="muted">{{ c.condition_group }}</small></td>
+            <td>{{ c.outcome }}</td>
+            <td>{{ c.windows_hit }} / {{ c.windows_total }}</td>
+            <td>{{ c.recurrence_pct|floatformat:0 }}%</td>
+            <td>{{ c.avg_uplift_pp|floatformat:2 }} pp</td>
+            <td>{{ c.best_q|floatformat:4 }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">No discovery-gate effect recurred in two rolling windows.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h3>Recent proposal-price archive</h3>
+  <p class="muted">
+    Proposal snapshots are stored with their observed timestamp so future
+    research can compare probability estimates with the contract economics
+    that Deriv actually offered. The reference grid is deliberately small on
+    web runs; the included management command can collect a broader grid.
+  </p>
+  {% if archive %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Observed</th>
+            <th>Symbol</th>
+            <th>Contract</th>
+            <th>Barrier</th>
+            <th>Ask</th>
+            <th>Payout</th>
+            <th>Break-even</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for q in archive %}
+          <tr>
+            <td>{{ q.observed_at }}</td>
+            <td>{{ q.symbol }}</td>
+            <td>{{ q.contract_type }}</td>
+            <td>{{ q.barrier|default:"—" }}</td>
+            <td>{{ q.ask_price|floatformat:4 }}</td>
+            <td>{{ q.payout|floatformat:4 }}</td>
+            <td>{{ q.break_even_pct|floatformat:2 }}%</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">No v1.2 archived proposal quotes yet.</p>
+  {% endif %}
+</section>
+{% endif %}
+
+{% endblock %}

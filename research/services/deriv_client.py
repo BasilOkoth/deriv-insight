@@ -44,10 +44,10 @@ class DerivPublicClient:
     def ticks_history(self, symbol, count=5000):
         """Fetch recent historical ticks in 1,000-tick backward pages.
 
-        The live Deriv endpoint may return 1,000 ticks even when a larger
-        `count` is requested. Therefore this client deliberately requests at
-        most 1,000 ticks per page and keeps paging backwards until the requested
-        total has been collected (up to 25,000 ticks).
+        v1.2 keeps one WebSocket open for the entire history request. The live
+        Deriv endpoint may return at most 1,000 ticks per response, so the
+        client pages backwards until the requested total is collected (up to
+        25,000 ticks).
 
         `subscribe` is omitted because this is a one-time history request.
         Results are returned in chronological order.
@@ -59,57 +59,69 @@ class DerivPublicClient:
         pip_size = 2
         seen_boundaries = set()
 
-        while remaining > 0:
-            ask = min(self.HISTORY_PAGE_SIZE, remaining)
+        ws = create_connection(self.url, timeout=self.timeout)
+        try:
+            while remaining > 0:
+                ask = min(self.HISTORY_PAGE_SIZE, remaining)
+                payload = {
+                    "ticks_history": symbol,
+                    "count": ask,
+                    "end": end,
+                    "style": "ticks",
+                }
 
-            payload = {
-                "ticks_history": symbol,
-                "count": ask,
-                "end": end,
-                "style": "ticks",
-            }
+                ws.send(json.dumps(payload))
 
-            data = self._call(payload)
-            hist = data.get("history") or {}
-            prices = list(hist.get("prices", []))
-            times = list(hist.get("times", []))
+                while True:
+                    raw = ws.recv()
+                    data = json.loads(raw)
+                    if data.get("error"):
+                        raise DerivAPIError(str(data["error"]))
+                    # No concurrent requests are sent, so the first non-error
+                    # response is the page we requested.
+                    break
 
-            response_pip_size = data.get("pip_size")
-            if response_pip_size is not None:
-                try:
-                    pip_size = int(response_pip_size)
-                except (TypeError, ValueError):
-                    pass
+                hist = data.get("history") or {}
+                prices = list(hist.get("prices", []))
+                times = list(hist.get("times", []))
 
-            if not prices or not times:
-                break
+                response_pip_size = data.get("pip_size")
+                if response_pip_size is not None:
+                    try:
+                        pip_size = int(response_pip_size)
+                    except (TypeError, ValueError):
+                        pass
 
-            usable = min(len(prices), len(times), remaining)
-            prices = prices[-usable:]
-            times = times[-usable:]
+                if not prices or not times:
+                    break
 
-            first_epoch = int(times[0])
-            last_epoch = int(times[-1])
-            boundary = (first_epoch, last_epoch, len(times))
+                usable = min(len(prices), len(times), remaining)
+                prices = prices[-usable:]
+                times = times[-usable:]
 
-            # Protect against an API/page boundary that stops moving backwards.
-            if boundary in seen_boundaries:
-                break
-            seen_boundaries.add(boundary)
+                first_epoch = int(times[0])
+                last_epoch = int(times[-1])
+                boundary = (first_epoch, last_epoch, len(times))
 
-            pages.append((prices, times))
-            remaining -= usable
+                if boundary in seen_boundaries:
+                    break
+                seen_boundaries.add(boundary)
 
-            if remaining <= 0:
-                break
+                pages.append((prices, times))
+                remaining -= usable
 
-            # If fewer than requested are returned, there is no older data
-            # available for this query boundary.
-            if usable < ask:
-                break
+                if remaining <= 0:
+                    break
 
-            # Move strictly behind the oldest tick already collected.
-            end = first_epoch - 1
+                if usable < ask:
+                    break
+
+                end = first_epoch - 1
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
 
         all_prices = []
         all_times = []

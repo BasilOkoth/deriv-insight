@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter, defaultdict
+
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.db.models import Sum
@@ -11,6 +13,7 @@ from django.conf import settings
 from .forms import (
     DigitLabForm,
     ConditionalEdgeForm,
+    CrossMarketForm,
     EdgeForm,
     BacktestForm,
     RiskConfigForm,
@@ -34,6 +37,13 @@ from .services.digits import (
     threshold_backtest,
 )
 from .services.conditional import run_conditional_edge_lab
+from .services.cross_market import (
+    CROSS_MARKET_ENGINE_VERSION,
+    RUN_TYPE,
+    FROZEN,
+    run_symbol_stability,
+    quote_reference_grid,
+)
 
 
 BARRIER_TYPES = {"DIGITMATCH", "DIGITDIFF", "DIGITOVER", "DIGITUNDER"}
@@ -312,6 +322,294 @@ def conditional_lab(request):
             "form": form,
             "result": result,
             "error": error,
+        },
+    )
+
+
+def _default_cross_market_symbols(symbol_rows):
+    """Prefer currently active Volatility 1s-style markets, then fill."""
+    preferred = []
+    fallback = []
+
+    for row in symbol_rows:
+        code = row["code"]
+        name = str(row["name"] or "")
+        if code.startswith("1HZ") and "volatility" in name.lower():
+            preferred.append(code)
+        else:
+            fallback.append(code)
+
+    chosen = preferred[:5]
+    for code in fallback:
+        if len(chosen) >= 5:
+            break
+        if code not in chosen:
+            chosen.append(code)
+    return chosen
+
+
+def _historical_candidate_recurrence(symbol, current_meta):
+    """Count validated candidate recurrence across recent saved v1.2 runs."""
+    runs = list(
+        ResearchRun.objects.filter(
+            symbol=symbol,
+            contract_type=RUN_TYPE,
+        ).order_by("-created_at")[:12]
+    )
+
+    counts = Counter()
+    meta = dict(current_meta or {})
+
+    for run in runs:
+        payload = run.results or {}
+        for key in payload.get("validated_keys", []):
+            counts[key] += 1
+        for key, value in (payload.get("candidate_meta") or {}).items():
+            meta.setdefault(key, value)
+
+    recurrent = []
+    for key, count in counts.items():
+        if count < 2:
+            continue
+        info = meta.get(key, {})
+        recurrent.append(
+            {
+                "key": key,
+                "runs_hit": count,
+                "runs_total": len(runs),
+                "condition": info.get("condition", key),
+                "condition_group": info.get("condition_group", ""),
+                "outcome": info.get("outcome", ""),
+            }
+        )
+
+    recurrent.sort(key=lambda row: (-row["runs_hit"], row["key"]))
+    return len(runs), recurrent
+
+
+@login_required
+def cross_market_lab(request):
+    cfg = RiskConfig.current()
+    symbol_rows = _symbols()
+
+    choices = [
+        (row["code"], f'{row["name"]} ({row["code"]})')
+        for row in symbol_rows
+    ]
+    name_by_code = {
+        row["code"]: row["name"]
+        for row in symbol_rows
+    }
+
+    defaults = _default_cross_market_symbols(symbol_rows)
+
+    form = CrossMarketForm(
+        request.POST or None,
+        symbol_choices=choices,
+        initial_symbols=defaults,
+        initial={
+            "ticks": "25000",
+            "stake": cfg.stake_usd,
+            "archive_quotes": True,
+        },
+    )
+
+    result = None
+    error = ""
+
+    if request.method == "POST" and form.is_valid():
+        selected = form.cleaned_data["symbols"]
+        ticks = int(form.cleaned_data["ticks"])
+        stake = float(form.cleaned_data["stake"])
+        should_archive = bool(form.cleaned_data["archive_quotes"])
+
+        market_rows = []
+        current_cross_symbol = defaultdict(
+            lambda: {
+                "symbols": [],
+                "condition": "",
+                "condition_group": "",
+                "outcome": "",
+            }
+        )
+        rolling_rows = []
+        quotes_archived = 0
+        total_tests = 0
+        total_discovery = 0
+        total_validated = 0
+
+        public = DerivPublicClient()
+
+        for symbol in selected:
+            row = {
+                "symbol": symbol,
+                "name": name_by_code.get(symbol, symbol),
+                "ok": False,
+                "error": "",
+            }
+
+            try:
+                data, digits = _history(symbol, ticks)
+                study = run_symbol_stability(digits)
+
+                row.update(
+                    {
+                        "ok": True,
+                        "ticks": study["ticks"],
+                        "window_count": study["window_count"],
+                        "tests_run": study["tests_run"],
+                        "discovery_candidate_count": study[
+                            "discovery_candidate_count"
+                        ],
+                        "validated_candidate_count": study[
+                            "validated_candidate_count"
+                        ],
+                        "rolling_recurrent_count": study[
+                            "rolling_recurrent_count"
+                        ],
+                    }
+                )
+
+                total_tests += study["tests_run"]
+                total_discovery += study["discovery_candidate_count"]
+                total_validated += study["validated_candidate_count"]
+
+                compact_results = {
+                    "engine_version": CROSS_MARKET_ENGINE_VERSION,
+                    "frozen": FROZEN,
+                    "ticks": study["ticks"],
+                    "tests_run": study["tests_run"],
+                    "discovery_candidate_count": study[
+                        "discovery_candidate_count"
+                    ],
+                    "validated_candidate_count": study[
+                        "validated_candidate_count"
+                    ],
+                    "validated_keys": study["validated_keys"],
+                    "candidate_meta": study["candidate_meta"],
+                    "rolling_recurrence": study["rolling_recurrence"][:15],
+                    "window_count": study["window_count"],
+                }
+
+                ResearchRun.objects.create(
+                    symbol=symbol,
+                    contract_type=RUN_TYPE,
+                    ticks=study["ticks"],
+                    results=compact_results,
+                )
+
+                prior_runs, hist_recurrent = _historical_candidate_recurrence(
+                    symbol,
+                    study["candidate_meta"],
+                )
+                row["prior_runs"] = prior_runs
+                row["historical_recurrent_count"] = len(hist_recurrent)
+                row["historical_recurrent"] = hist_recurrent[:10]
+
+                for candidate in study["validated"]:
+                    key = candidate["candidate_key"]
+                    bucket = current_cross_symbol[key]
+                    bucket["symbols"].append(symbol)
+                    bucket["condition"] = candidate["condition"]
+                    bucket["condition_group"] = candidate[
+                        "condition_group"
+                    ]
+                    bucket["outcome"] = candidate["outcome"]
+
+                for candidate in study["rolling_recurrence"]:
+                    if candidate["windows_hit"] < 2:
+                        continue
+                    rolling_rows.append(
+                        {
+                            **candidate,
+                            "symbol": symbol,
+                        }
+                    )
+
+                if should_archive:
+                    for quote in quote_reference_grid(
+                        public,
+                        symbol,
+                        stake=stake,
+                    ):
+                        if not quote["ok"]:
+                            continue
+
+                        ProposalSnapshot.objects.create(
+                            symbol=symbol,
+                            contract_type=quote["contract_type"],
+                            barrier=quote["barrier"] or "",
+                            stake=stake,
+                            ask_price=quote["ask_price"],
+                            payout=quote["payout"],
+                            break_even_pct=quote["break_even_pct"],
+                            model_probability_pct=0,
+                            lower95_pct=0,
+                            edge_pp=0,
+                            sample_ticks=0,
+                            decision="ARCHIVE V1.2",
+                        )
+                        quotes_archived += 1
+
+            except Exception as exc:
+                row["error"] = str(exc)
+
+            market_rows.append(row)
+
+        cross_symbol = []
+        for key, bucket in current_cross_symbol.items():
+            symbols = sorted(set(bucket["symbols"]))
+            if len(symbols) < 2:
+                continue
+            cross_symbol.append(
+                {
+                    "key": key,
+                    "condition": bucket["condition"],
+                    "condition_group": bucket["condition_group"],
+                    "outcome": bucket["outcome"],
+                    "symbol_count": len(symbols),
+                    "symbols": symbols,
+                }
+            )
+
+        cross_symbol.sort(
+            key=lambda row: (-row["symbol_count"], row["key"])
+        )
+        rolling_rows.sort(
+            key=lambda row: (
+                -row["windows_hit"],
+                row["best_q"],
+                -row["avg_uplift_pp"],
+            )
+        )
+
+        result = {
+            "engine_version": CROSS_MARKET_ENGINE_VERSION,
+            "requested": len(selected),
+            "completed": sum(1 for row in market_rows if row["ok"]),
+            "failed": sum(1 for row in market_rows if not row["ok"]),
+            "total_tests": total_tests,
+            "total_discovery": total_discovery,
+            "total_validated": total_validated,
+            "cross_symbol_recurrent_count": len(cross_symbol),
+            "cross_symbol": cross_symbol[:30],
+            "rolling": rolling_rows[:40],
+            "quotes_archived": quotes_archived,
+            "markets": market_rows,
+        }
+
+    archive = ProposalSnapshot.objects.filter(
+        decision="ARCHIVE V1.2"
+    ).order_by("-observed_at")[:30]
+
+    return render(
+        request,
+        "research/cross_market.html",
+        {
+            "form": form,
+            "result": result,
+            "error": error,
+            "archive": archive,
         },
     )
 

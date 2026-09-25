@@ -1,42 +1,52 @@
 [
   {
     "path": "research/forms.py",
-    "sha256": "d9136ce2be9b1f800fc3d4dcfde7ea658cf1d30e38c82a31c402be71a96f7746",
-    "bytes": 4008
+    "sha256": "42226afce7d0fcfccf953bf2e25ec0fd374d7ce373c4f6fb8616331889f5ea9e",
+    "bytes": 5450
   },
   {
     "path": "research/views.py",
-    "sha256": "463790ad02c90f788ceeeae2a3fd81857d759f536f1f4f11a8d441197df248e6",
-    "bytes": 21051
+    "sha256": "232f75e582badfc266b1da67d1003210d23a601776239be7d605ec9051be5879",
+    "bytes": 30833
   },
   {
     "path": "research/urls.py",
-    "sha256": "638789f0540ee80be7f9cd452e81817a713dcc5eb348a8f88b61782a3f1686e8",
-    "bytes": 523
-  },
-  {
-    "path": "research/services/conditional.py",
-    "sha256": "95c6a2ddfb522497557317186e72b57884de2f26d6891861f2bf49f47ac43920",
-    "bytes": 12635
+    "sha256": "4537004669c3adac32b8e577bc3fe1d33f26b190f24bef44757c8da94ae43cc2",
+    "bytes": 599
   },
   {
     "path": "research/templates/research/base.html",
-    "sha256": "2c9d5cc15229207b36c4e605d89923d63e2488682e74d391c7cdbe729b58635e",
-    "bytes": 1194
+    "sha256": "9f0e20a2a44f8e52a1b3a1947f8d84fa69ff1329d935f9601700fc378184b413",
+    "bytes": 1261
   },
   {
-    "path": "research/templates/research/conditional.html",
-    "sha256": "dc6d5d67f1577583c01f87f03a4e3ef418ad9af6b9570890f482096940b9d226",
-    "bytes": 7322
+    "path": "research/services/deriv_client.py",
+    "sha256": "4dce438c073e653787fc0105fd48b818fbdfcd6809259c48f2233d87fa15308f",
+    "bytes": 10719
+  },
+  {
+    "path": "research/services/cross_market.py",
+    "sha256": "9718509bc81316dac72fe00bf20b47cb6678e9eeca0c25570fae36d648efc1ce",
+    "bytes": 8951
+  },
+  {
+    "path": "research/templates/research/cross_market.html",
+    "sha256": "7a746de9d7eafead94539d3d16eb998c0aed16787da2e0d24390849c3b849b9c",
+    "bytes": 7362
+  },
+  {
+    "path": "research/management/commands/archive_digit_quotes.py",
+    "sha256": "6be86397a2fc2ddba0c3c52ea762323005bdf3b06b1bff24ea4eefc43553b092",
+    "bytes": 3825
   },
   {
     "path": "UPLOAD_INSTRUCTIONS.txt",
-    "sha256": "45ad49ad60c1ca55d983978aca11e57497ee2ae1d208beaa7eb7243f985329df",
-    "bytes": 1954
+    "sha256": "4c924dce85c0d13e02fa95b63ddf14ccb96a952d9821b8edc88e781bba2fb6fd",
+    "bytes": 2828
   },
   {
-    "path": "README_CONDITIONAL_V1_1.md",
-    "sha256": "3619fcd1f6c1f99c5e1333d8f477bb1192c429bfdfd03310d3303129820f36b0",
-    "bytes": 2177
+    "path": "README_V1_2.md",
+    "sha256": "7a40ab594f95c48db86a3737f1d43bde298a45d46ff46c30a58cd5b2f7fbafa2",
+    "bytes": 2275
   }
 ]
